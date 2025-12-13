@@ -9,6 +9,7 @@ architecture, risk management, security, and performance standards.
 import os
 import json
 import re
+import argparse
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
 from dataclasses import dataclass, field
@@ -426,36 +427,41 @@ class SecurityAnalyzer:
         ]
         
         # File extensions to check for secrets
-        file_extensions = ['*.py', '*.js', '*.ts', '*.jsx', '*.tsx', '*.json', 
-                          '*.yaml', '*.yml', '*.env', '*.config', '*.conf']
+        target_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.json', 
+                           '.yaml', '.yml', '.env', '.config', '.conf'}
+        skip_dirs = {'.git', '__pycache__', 'node_modules', 'venv', '.venv', 'dist', 'build'}
         
-        for ext in file_extensions:
-            for file_path in self.project_path.rglob(ext):
-                # Skip common directories that shouldn't contain secrets
-                if any(part in file_path.parts for part in ['.git', '__pycache__', 'node_modules', 'venv', '.venv']):
+        # Single traversal of all files
+        for file_path in self.project_path.rglob('*'):
+            # Check if it's a file and has target extension
+            if not file_path.is_file() or file_path.suffix not in target_extensions:
+                continue
+            
+            # Skip common directories that shouldn't contain secrets
+            if any(part in file_path.parts for part in skip_dirs):
+                continue
+            
+            try:
+                content = file_path.read_text(encoding='utf-8')
+                # Skip files that are clearly test or example files
+                if any(marker in content.lower() for marker in ['this is a test', 'example only', 'placeholder']):
                     continue
                 
-                try:
-                    content = file_path.read_text(encoding='utf-8')
-                    # Skip files that are clearly test or example files
-                    if any(marker in content.lower() for marker in ['this is a test', 'example only', 'placeholder']):
-                        continue
-                    
-                    for pattern in secret_patterns:
-                        if re.search(pattern, content, re.IGNORECASE):
-                            # Additional check: ensure it's not in a comment
-                            matches = re.finditer(pattern, content, re.IGNORECASE)
-                            for match in matches:
-                                # Get the line containing the match
-                                start = content.rfind('\n', 0, match.start()) + 1
-                                line = content[start:content.find('\n', match.start())]
-                                # Check if it's not a comment
-                                stripped = line.strip()
-                                if not (stripped.startswith('#') or stripped.startswith('//')):
-                                    return True
-                except (UnicodeDecodeError, PermissionError, OSError):
-                    # Skip files that can't be read (binary files, permission issues, etc.)
-                    continue
+                for pattern in secret_patterns:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        # Additional check: ensure it's not in a comment
+                        matches = re.finditer(pattern, content, re.IGNORECASE)
+                        for match in matches:
+                            # Get the line containing the match
+                            start = content.rfind('\n', 0, match.start()) + 1
+                            line = content[start:content.find('\n', match.start())]
+                            # Check if it's not a comment
+                            stripped = line.strip()
+                            if not (stripped.startswith('#') or stripped.startswith('//')):
+                                return True
+            except (UnicodeDecodeError, PermissionError, OSError):
+                # Skip files that can't be read (binary files, permission issues, etc.)
+                continue
         
         return False
     
@@ -658,8 +664,6 @@ class SuperAgenteAuditor:
 
 def main():
     """Main entry point for the SUPER AGENTE Auditor"""
-    import argparse
-    
     parser = argparse.ArgumentParser(
         description="SUPER AGENTE Auditor - Comprehensive Project Analysis Tool"
     )
