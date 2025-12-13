@@ -15,8 +15,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Final, NewType, Self
+from typing import TYPE_CHECKING, Final, NewType
 from uuid import UUID, uuid4
+
+try:
+    from typing import Self  # Python 3.11+
+except ImportError:
+    from typing_extensions import Self  # Python 3.10
 
 from pydantic import (
     BaseModel,
