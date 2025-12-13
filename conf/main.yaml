@@ -1,0 +1,53 @@
+# ==============================================================================
+# QTS-Architect Main Configuration
+# ==============================================================================
+# This is the root configuration file. All parameters should be defined here
+# or in composed config groups. NEVER hardcode values in Python code.
+#
+# Usage:
+#   python -m qts_core.main                    # defaults
+#   python -m qts_core.main env=prod           # override env
+#   python -m qts_core.main dataset=binance    # select dataset config
+# ==============================================================================
+
+defaults:
+  - _self_
+  - dataset: null       # Composed from conf/dataset/*.yaml
+  - model: null          # Composed from conf/model/*.yaml  
+  - strategy: null       # Composed from conf/strategy/*.yaml
+
+# ------------------------------------------------------------------------------
+# Environment Configuration
+# ------------------------------------------------------------------------------
+env: "dev"               # Options: dev, staging, prod
+debug: true              # Enable verbose logging and config dumps
+
+# ------------------------------------------------------------------------------
+# Application Metadata (injected at runtime)
+# ------------------------------------------------------------------------------
+app:
+  name: "QTS-Architect"
+  version: "0.1.0"
+
+# ------------------------------------------------------------------------------
+# Logging Configuration
+# ------------------------------------------------------------------------------
+logging:
+  level: "INFO"          # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  json_output: false     # true for production (ELK/Datadog), false for dev console
+  
+# ------------------------------------------------------------------------------
+# Hydra Configuration
+# ------------------------------------------------------------------------------
+hydra:
+  run:
+    # Output directory pattern: outputs/YYYY-MM-DD/HH-MM-SS
+    dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    # Multirun output directory
+    dir: ./multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job_logging:
+    version: 1
+    disable_existing_loggers: false
+  verbose: ${debug}

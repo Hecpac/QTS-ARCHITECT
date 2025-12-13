@@ -1,0 +1,6 @@
+_target_: qts_core.execution.ems.CCXTGateway
+exchange_name: "kraken"
+sandbox: false
+apiKey: ""
+secret: ""
+paper_trading: true

@@ -1,0 +1,29 @@
+# ==============================================================================
+# Model Configuration: Hidden Markov Model for Regime Detection
+# ==============================================================================
+# Instantiated via: hydra.utils.instantiate(cfg.model)
+# Used to detect market regimes (trending, ranging, volatile)
+# ==============================================================================
+
+_target_: qts_core.models.regime.HMMRegimeDetector
+
+# Model Architecture
+n_components: 3           # Number of hidden states (regimes)
+covariance_type: "full"   # Options: spherical, diag, full, tied
+n_iter: 100               # EM algorithm iterations
+random_state: 42          # For reproducibility
+
+# Feature Engineering
+features:
+  - "returns"             # Log returns
+  - "volatility"          # Rolling std of returns
+  - "volume_ma_ratio"     # Volume / MA(volume)
+
+# Lookback Windows
+lookback_periods:
+  volatility: 20
+  volume_ma: 20
+
+# Training Parameters
+min_train_samples: 500    # Minimum observations before fitting
+refit_interval: 168       # Refit every N bars (168 = 1 week of hourly data)

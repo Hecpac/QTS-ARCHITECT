@@ -1,0 +1,23 @@
+# ==============================================================================
+# Dataset Configuration: DuckDB Local Storage
+# ==============================================================================
+# For backtesting with pre-downloaded data stored in DuckDB.
+# Faster than API calls, enables reproducible experiments.
+# ==============================================================================
+
+_target_: qts_core.data.loaders.DuckDBDataLoader
+
+# Database Path (relative to Hydra working directory)
+db_path: "${hydra:runtime.cwd}/data/market_data.duckdb"
+
+# Query Parameters
+table_name: "ohlcv"
+symbol: "BTC/USDT"
+timeframe: "1h"
+
+# Data Range
+start_date: "2024-01-01T00:00:00Z"
+end_date: "2024-12-01T00:00:00Z"
+
+# Performance
+batch_size: 10000

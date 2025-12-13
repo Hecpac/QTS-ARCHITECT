@@ -1,0 +1,24 @@
+# ==============================================================================
+# Dataset Configuration: Binance BTC/USDT
+# ==============================================================================
+# Instantiated via: hydra.utils.instantiate(cfg.dataset)
+# Target class must implement DataLoader protocol from qts_core.data.interfaces
+# ==============================================================================
+
+_target_: qts_core.data.loaders.CCXTDataLoader
+
+# Connection Settings
+exchange_id: "binance"
+symbol: "BTC/USDT"
+timeframe: "1h"
+
+# Data Range (ISO 8601 format, always UTC)
+start_date: "2024-01-01T00:00:00Z"
+end_date: null  # null = fetch up to current time
+
+# Caching
+cache_enabled: true
+cache_dir: "${hydra:runtime.cwd}/data/cache"
+
+# Rate Limiting (requests per second)
+rate_limit: 10
