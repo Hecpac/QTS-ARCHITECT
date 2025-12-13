@@ -1,0 +1,156 @@
+{
+  "auditor_settings": {
+    "version": "1.0.0",
+    "enabled_analyzers": [
+      "BMadMethodAnalyzer",
+      "ICTPatternAnalyzer",
+      "ArchitectureAnalyzer",
+      "RiskManagementAnalyzer",
+      "SecurityAnalyzer",
+      "PerformanceAnalyzer"
+    ],
+    "severity_thresholds": {
+      "critical": {
+        "fail_build": true,
+        "require_fix": true
+      },
+      "high": {
+        "fail_build": false,
+        "require_fix": true
+      },
+      "medium": {
+        "fail_build": false,
+        "require_fix": false
+      },
+      "low": {
+        "fail_build": false,
+        "require_fix": false
+      },
+      "info": {
+        "fail_build": false,
+        "require_fix": false
+      }
+    },
+    "output_formats": [
+      "json",
+      "console"
+    ]
+  },
+  "bmad_method": {
+    "description": "BMad Method compliance checking",
+    "required_patterns": [
+      "modular_architecture",
+      "comprehensive_documentation",
+      "test_driven_development"
+    ],
+    "standards": {
+      "documentation_min_length": 100,
+      "test_coverage_target": 80,
+      "module_separation": true
+    }
+  },
+  "ict_patterns": {
+    "description": "Information and Communication Technology patterns",
+    "recommended_patterns": [
+      "REST API",
+      "GraphQL",
+      "Repository Pattern",
+      "Message Queue",
+      "Event-Driven Architecture"
+    ],
+    "communication_standards": {
+      "api_versioning": true,
+      "data_validation": true,
+      "error_handling": true
+    }
+  },
+  "architecture": {
+    "description": "Architecture best practices and patterns",
+    "recommended_layers": [
+      "presentation",
+      "business_logic",
+      "data_access"
+    ],
+    "patterns": [
+      "Dependency Injection",
+      "Service Layer",
+      "Repository Pattern",
+      "Factory Pattern"
+    ],
+    "principles": [
+      "Separation of Concerns",
+      "Single Responsibility",
+      "Open/Closed Principle",
+      "Dependency Inversion"
+    ]
+  },
+  "risk_management": {
+    "description": "Risk management and mitigation strategies",
+    "required_elements": [
+      "error_handling",
+      "logging",
+      "monitoring",
+      "backup_recovery",
+      "disaster_recovery_plan"
+    ],
+    "monitoring_tools": [
+      "Prometheus",
+      "Grafana",
+      "ELK Stack",
+      "CloudWatch"
+    ]
+  },
+  "security": {
+    "description": "Security best practices and standards",
+    "critical_checks": [
+      "no_hardcoded_secrets",
+      "authentication",
+      "authorization",
+      "input_validation",
+      "sql_injection_prevention",
+      "xss_prevention"
+    ],
+    "required_documentation": [
+      "SECURITY.md",
+      "vulnerability_disclosure_policy"
+    ],
+    "tools": [
+      "Dependabot",
+      "Snyk",
+      "OWASP ZAP",
+      "SonarQube"
+    ]
+  },
+  "performance": {
+    "description": "Performance standards and optimization",
+    "optimization_areas": [
+      "caching",
+      "database_indexing",
+      "query_optimization",
+      "async_operations",
+      "load_balancing"
+    ],
+    "testing_requirements": [
+      "performance_testing",
+      "load_testing",
+      "stress_testing"
+    ],
+    "tools": [
+      "Redis",
+      "Memcached",
+      "Apache JMeter",
+      "K6"
+    ]
+  },
+  "recommendations": {
+    "priority_order": [
+      "security",
+      "architecture",
+      "risk_management",
+      "bmad_method",
+      "ict_patterns",
+      "performance"
+    ],
+    "continuous_improvement": true
+  }
+}
