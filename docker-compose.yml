@@ -26,7 +26,11 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./conf:/app/conf:ro
-    command: python -m qts_core.main_live store.redis_url=redis://redis:6379/0
+      # Optional: persist Hydra outputs for debugging without tracking in git
+      - ./outputs:/app/outputs
+      - ./multirun:/app/multirun
+    # Use env-driven config (conf/store/redis.yaml reads REDIS_URL)
+    command: python -m qts_core.main_live
     restart: on-failure
 
   dashboard:
@@ -45,5 +49,7 @@ services:
       - "8501:8501"
     volumes:
       - ./conf:/app/conf:ro
-    command: streamlit run qts_core/src/qts_core/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    # Avoid coupling to repo paths inside the container: resolve the Streamlit app via import.
+    command: >
+      sh -c "streamlit run $(python -c 'import qts_core.dashboard.app as app; print(app.__file__)') --server.port 8501 --server.address 0.0.0.0"
     restart: always
