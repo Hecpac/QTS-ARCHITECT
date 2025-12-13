@@ -40,9 +40,9 @@ outputs/
 multirun/
 qts_core/outputs/
 
-# Project-specific generated data
-data/
-logs/
+# Project-specific generated data (root only, not source code)
+/data/
+/logs/
 
 # OS
 .DS_Store
