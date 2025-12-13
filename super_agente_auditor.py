@@ -219,20 +219,20 @@ class ICTPatternAnalyzer:
         """Check for API patterns"""
         api_indicators = ['api', 'routes', 'controllers', 'endpoints', 'graphql']
         return any((self.project_path / indicator).exists() or 
-                   list(self.project_path.rglob(f'*{indicator}*')) 
+                   any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in api_indicators)
     
     def _check_data_layer(self) -> bool:
         """Check for data layer patterns"""
         data_indicators = ['models', 'repositories', 'dao', 'entities', 'database']
         return any((self.project_path / indicator).exists() or 
-                   list(self.project_path.rglob(f'*{indicator}*')) 
+                   any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in data_indicators)
     
     def _check_communication_patterns(self) -> bool:
         """Check for communication patterns"""
         comm_indicators = ['events', 'messaging', 'queue', 'pubsub', 'websocket']
-        return any(list(self.project_path.rglob(f'*{indicator}*')) 
+        return any(any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in comm_indicators)
 
 
@@ -354,7 +354,7 @@ class RiskManagementAnalyzer:
     def _check_monitoring(self) -> bool:
         """Check for monitoring setup"""
         monitoring_indicators = ['prometheus', 'grafana', 'monitoring', 'metrics']
-        return any(list(self.project_path.rglob(f'*{indicator}*')) 
+        return any(any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in monitoring_indicators)
 
 
@@ -442,7 +442,7 @@ class SecurityAnalyzer:
     def _check_auth_patterns(self) -> bool:
         """Check for authentication patterns"""
         auth_indicators = ['auth', 'authentication', 'authorization', 'login', 'jwt']
-        return any(list(self.project_path.rglob(f'*{indicator}*')) 
+        return any(any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in auth_indicators)
 
 
@@ -500,20 +500,20 @@ class PerformanceAnalyzer:
     def _check_caching(self) -> bool:
         """Check for caching implementation"""
         cache_indicators = ['cache', 'redis', 'memcached']
-        return any(list(self.project_path.rglob(f'*{indicator}*')) 
+        return any(any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in cache_indicators)
     
     def _check_database_optimization(self) -> bool:
         """Check for database optimization"""
         db_indicators = ['migrations', 'indexes', 'schema']
         return any((self.project_path / indicator).exists() or 
-                   list(self.project_path.rglob(f'*{indicator}*')) 
+                   any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in db_indicators)
     
     def _check_performance_testing(self) -> bool:
         """Check for performance testing"""
         perf_indicators = ['benchmark', 'load-test', 'performance-test', 'k6', 'jmeter']
-        return any(list(self.project_path.rglob(f'*{indicator}*')) 
+        return any(any(self.project_path.rglob(f'*{indicator}*')) 
                    for indicator in perf_indicators)
     
     def _check_async_patterns(self) -> bool:
