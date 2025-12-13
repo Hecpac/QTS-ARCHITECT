@@ -1,0 +1,844 @@
+"""Order Management System (OMS) for QTS-Architect.
+
+The OMS is the "accountant" of the trading system - it maintains the
+true state of the portfolio and handles order lifecycle management.
+
+Responsibilities:
+- Portfolio state management (cash, positions, blocked amounts)
+- Order creation with pessimistic locking
+- Pre-trade risk validation
+- Fill confirmation and settlement
+- Crash recovery via atomic persistence
+
+Design Decisions:
+- Pessimistic locking: Reserve funds/positions BEFORE sending to EMS
+- Atomic state updates: Use store transactions when available
+- Immutable order records: Orders never mutate, only status changes
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from typing import TYPE_CHECKING, Final
+
+import structlog
+from pydantic import (
+    BaseModel,
+    Field,
+    PositiveFloat,
+    field_validator,
+    model_validator,
+)
+
+from qts_core.agents.protocol import SignalType, TradingDecision
+from qts_core.common.types import InstrumentId
+from qts_core.execution.store import MemoryStore, RedisStore
+
+if TYPE_CHECKING:
+    pass
+
+log = structlog.get_logger()
+
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+DEFAULT_INITIAL_CASH: Final[float] = 100_000.0
+DEFAULT_RISK_FRACTION: Final[float] = 0.10
+MIN_QUANTITY: Final[float] = 1e-8  # Minimum tradeable quantity
+
+
+# ==============================================================================
+# Enums
+# ==============================================================================
+class OrderType(str, Enum):
+    """Order execution type."""
+
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+    STOP = "STOP"
+    STOP_LIMIT = "STOP_LIMIT"
+
+
+class OrderSide(str, Enum):
+    """Order direction."""
+
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderStatus(str, Enum):
+    """Order lifecycle state.
+
+    State Transitions:
+        PENDING -> SUBMITTED -> FILLED
+                            -> PARTIALLY_FILLED -> FILLED
+                            -> CANCELLED
+                            -> FAILED
+        PENDING -> FAILED (validation failure)
+    """
+
+    PENDING = "PENDING"  # Created in OMS, not yet sent
+    SUBMITTED = "SUBMITTED"  # Sent to EMS/Exchange
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"  # Partial execution
+    FILLED = "FILLED"  # Fully executed
+    CANCELLED = "CANCELLED"  # Cancelled by user or system
+    FAILED = "FAILED"  # Failed to execute
+    EXPIRED = "EXPIRED"  # Time-based expiration
+
+
+class TimeInForce(str, Enum):
+    """Order time validity."""
+
+    GTC = "GTC"  # Good Till Cancelled
+    IOC = "IOC"  # Immediate or Cancel
+    FOK = "FOK"  # Fill or Kill
+    DAY = "DAY"  # Day order
+
+
+# ==============================================================================
+# Custom Exceptions
+# ==============================================================================
+class OMSError(Exception):
+    """Base exception for OMS errors."""
+
+
+class InsufficientFundsError(OMSError):
+    """Raised when insufficient cash for buy order."""
+
+    def __init__(self, required: float, available: float) -> None:
+        self.required = required
+        self.available = available
+        super().__init__(f"Insufficient funds: required={required:.2f}, available={available:.2f}")
+
+
+class InsufficientPositionError(OMSError):
+    """Raised when insufficient position for sell order."""
+
+    def __init__(self, instrument: str, required: float, available: float) -> None:
+        self.instrument = instrument
+        self.required = required
+        self.available = available
+        super().__init__(
+            f"Insufficient position for {instrument}: required={required:.8f}, available={available:.8f}"
+        )
+
+
+class OrderNotFoundError(OMSError):
+    """Raised when order not found in store."""
+
+    def __init__(self, order_id: str) -> None:
+        self.order_id = order_id
+        super().__init__(f"Order not found: {order_id}")
+
+
+class InvalidOrderStateError(OMSError):
+    """Raised when order state transition is invalid."""
+
+    def __init__(self, order_id: str, current: OrderStatus, attempted: OrderStatus) -> None:
+        self.order_id = order_id
+        self.current = current
+        self.attempted = attempted
+        super().__init__(
+            f"Invalid state transition for order {order_id}: {current.value} -> {attempted.value}"
+        )
+
+
+# ==============================================================================
+# Domain Models
+# ==============================================================================
+class Order(BaseModel):
+    """Internal representation of an order.
+
+    Orders are semi-immutable: core fields (instrument, side, quantity)
+    cannot change after creation, only status and metadata fields update.
+
+    Attributes:
+        id: Unique order identifier (UUID).
+        decision_id: Reference to TradingDecision that triggered this order.
+        instrument_id: Trading pair/instrument identifier.
+        side: Buy or sell.
+        quantity: Order quantity.
+        order_type: Execution type (MARKET, LIMIT, etc.).
+        status: Current lifecycle state.
+        limit_price: Price for limit orders (optional).
+        stop_price: Trigger price for stop orders (optional).
+        time_in_force: Order validity duration.
+        reserved_cash: Cash blocked for buy orders.
+        reserved_quantity: Quantity blocked for sell orders.
+        filled_quantity: Quantity filled so far.
+        average_fill_price: Average price of fills.
+        created_at: Order creation timestamp.
+        updated_at: Last update timestamp.
+        external_id: Exchange/broker order ID.
+    """
+
+    model_config = {"frozen": False, "validate_assignment": True}
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    decision_id: str | None = None
+    instrument_id: InstrumentId
+    side: OrderSide
+    quantity: float = Field(gt=0)
+    order_type: OrderType = OrderType.MARKET
+    status: OrderStatus = OrderStatus.PENDING
+    limit_price: float | None = Field(default=None, gt=0)
+    stop_price: float | None = Field(default=None, gt=0)
+    time_in_force: TimeInForce = TimeInForce.GTC
+    reserved_cash: float | None = Field(default=None, ge=0)
+    reserved_quantity: float | None = Field(default=None, ge=0)
+    filled_quantity: float = Field(default=0.0, ge=0)
+    average_fill_price: float | None = Field(default=None, ge=0)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    external_id: str | None = None
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def validate_quantity(cls, v: float) -> float:
+        """Ensure quantity meets minimum threshold."""
+        if v < MIN_QUANTITY:
+            msg = f"Quantity {v} below minimum {MIN_QUANTITY}"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def validate_limit_price_for_limit_orders(self) -> Order:
+        """Ensure limit orders have limit price."""
+        if self.order_type in {OrderType.LIMIT, OrderType.STOP_LIMIT}:
+            if self.limit_price is None:
+                msg = f"Limit price required for {self.order_type.value} orders"
+                raise ValueError(msg)
+        return self
+
+    @property
+    def remaining_quantity(self) -> float:
+        """Quantity still to be filled."""
+        return max(0.0, self.quantity - self.filled_quantity)
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether order is in a final state."""
+        return self.status in {
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.FAILED,
+            OrderStatus.EXPIRED,
+        }
+
+    def can_transition_to(self, new_status: OrderStatus) -> bool:
+        """Check if state transition is valid."""
+        valid_transitions: dict[OrderStatus, set[OrderStatus]] = {
+            OrderStatus.PENDING: {OrderStatus.SUBMITTED, OrderStatus.FAILED},
+            OrderStatus.SUBMITTED: {
+                OrderStatus.PARTIALLY_FILLED,
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.FAILED,
+                OrderStatus.EXPIRED,
+            },
+            OrderStatus.PARTIALLY_FILLED: {
+                OrderStatus.PARTIALLY_FILLED,
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+            },
+            # Terminal states
+            OrderStatus.FILLED: set(),
+            OrderStatus.CANCELLED: set(),
+            OrderStatus.FAILED: set(),
+            OrderStatus.EXPIRED: set(),
+        }
+        return new_status in valid_transitions.get(self.status, set())
+
+
+class Portfolio(BaseModel):
+    """Current state of holdings and cash.
+
+    Implements pessimistic locking through blocked_cash and blocked_positions
+    to prevent double-spending during order execution.
+
+    Attributes:
+        cash: Available free balance (quote currency).
+        positions: Mapping of instrument -> quantity held.
+        blocked_cash: Cash locked in pending buy orders.
+        blocked_positions: Quantity locked in pending sell orders.
+    """
+
+    model_config = {"frozen": False}
+
+    cash: float = Field(ge=0, description="Available free balance")
+    positions: dict[InstrumentId, float] = Field(
+        default_factory=dict,
+        description="InstrumentId -> Quantity held",
+    )
+    blocked_cash: float = Field(
+        default=0.0,
+        ge=0,
+        description="Cash locked in pending buy orders",
+    )
+    blocked_positions: dict[InstrumentId, float] = Field(
+        default_factory=dict,
+        description="Quantity locked in pending sell orders",
+    )
+
+    @property
+    def total_cash(self) -> float:
+        """Total cash including blocked amounts."""
+        return self.cash + self.blocked_cash
+
+    @property
+    def total_equity(self) -> float:
+        """Total equity (cash only - positions need prices)."""
+        return self.total_cash
+
+    def get_position(self, instrument_id: InstrumentId) -> float:
+        """Get position for instrument (0 if not held)."""
+        return self.positions.get(instrument_id, 0.0)
+
+    def get_available_position(self, instrument_id: InstrumentId) -> float:
+        """Get position minus blocked quantity."""
+        held = self.get_position(instrument_id)
+        blocked = self.blocked_positions.get(instrument_id, 0.0)
+        return max(0.0, held - blocked)
+
+
+class OrderRequest(BaseModel):
+    """Request payload sent to EMS.
+
+    Immutable transfer object containing all information needed
+    for the execution gateway to submit the order.
+    """
+
+    model_config = {"frozen": True}
+
+    oms_order_id: str
+    instrument_id: InstrumentId
+    side: OrderSide
+    quantity: PositiveFloat
+    order_type: OrderType
+    limit_price: float | None = None
+    stop_price: float | None = None
+    time_in_force: TimeInForce = TimeInForce.GTC
+
+
+class FillEvent(BaseModel):
+    """Represents a fill/execution event from EMS.
+
+    Immutable record of an execution that occurred.
+    """
+
+    model_config = {"frozen": True}
+
+    oms_order_id: str
+    fill_price: PositiveFloat
+    fill_quantity: PositiveFloat
+    fee: float = Field(default=0.0, ge=0)
+    exchange_trade_id: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ==============================================================================
+# Order Management System
+# ==============================================================================
+class OrderManagementSystem:
+    """The Accountant - manages portfolio state and order lifecycle.
+
+    The OMS implements pessimistic locking to ensure portfolio consistency:
+    1. Before creating an order, it reserves (blocks) the required funds/positions
+    2. On fill confirmation, it settles the trade and releases blocks
+    3. On failure/cancellation, it reverts the reservations
+
+    This approach prevents double-spending and ensures the portfolio
+    state is always consistent even if the system crashes mid-execution.
+
+    Attributes:
+        store: Persistence backend.
+        portfolio: Current portfolio state.
+        risk_fraction: Max fraction of cash per trade.
+    """
+
+    PORTFOLIO_KEY: Final[str] = "oms:portfolio"
+    ORDERS_KEY_PREFIX: Final[str] = "oms:order:"
+
+    def __init__(
+        self,
+        store: RedisStore | MemoryStore,
+        initial_cash: float = DEFAULT_INITIAL_CASH,
+        risk_fraction: float = DEFAULT_RISK_FRACTION,
+    ) -> None:
+        """Initialize OMS with store and configuration.
+
+        Args:
+            store: Persistence backend (Redis or Memory).
+            initial_cash: Starting cash balance for new portfolios.
+            risk_fraction: Maximum fraction of cash to risk per trade.
+
+        Raises:
+            ValueError: If risk_fraction not in (0, 1].
+        """
+        if not 0 < risk_fraction <= 1:
+            msg = f"risk_fraction must be in (0, 1], got {risk_fraction}"
+            raise ValueError(msg)
+
+        self.store = store
+        self.risk_fraction = risk_fraction
+        self.portfolio = self._load_or_init_portfolio(initial_cash)
+
+    def _load_or_init_portfolio(self, initial_cash: float) -> Portfolio:
+        """Load portfolio from store or create new one."""
+        portfolio = self.store.load(self.PORTFOLIO_KEY, Portfolio)
+        if portfolio:
+            log.info(
+                "Portfolio loaded from persistence",
+                cash=portfolio.cash,
+                positions=len(portfolio.positions),
+            )
+            return portfolio
+
+        portfolio = Portfolio(cash=initial_cash)
+        self.store.save(self.PORTFOLIO_KEY, portfolio)
+        log.info("New portfolio initialized", cash=initial_cash)
+        return portfolio
+
+    def _persist_state(self, order: Order) -> None:
+        """Persist portfolio and order atomically if possible."""
+        if hasattr(self.store, "save_atomic"):
+            self.store.save_atomic(
+                {
+                    self.PORTFOLIO_KEY: self.portfolio,
+                    f"{self.ORDERS_KEY_PREFIX}{order.id}": order,
+                }
+            )
+        else:
+            self.store.save(self.PORTFOLIO_KEY, self.portfolio)
+            self.store.save(f"{self.ORDERS_KEY_PREFIX}{order.id}", order)
+
+    def _order_key(self, order_id: str) -> str:
+        """Generate store key for order."""
+        return f"{self.ORDERS_KEY_PREFIX}{order_id}"
+
+    def get_order(self, order_id: str) -> Order | None:
+        """Retrieve order by ID."""
+        return self.store.load(self._order_key(order_id), Order)
+
+    def calculate_order_quantity(
+        self,
+        current_price: float,
+        quantity_modifier: float = 1.0,
+    ) -> float:
+        """Calculate order quantity based on risk parameters.
+
+        Args:
+            current_price: Current market price.
+            quantity_modifier: Multiplier from signal (0.0-1.0).
+
+        Returns:
+            Order quantity based on risk fraction.
+        """
+        trade_value = self.portfolio.cash * self.risk_fraction * quantity_modifier
+        return trade_value / current_price if current_price > 0 else 0.0
+
+    def process_decision(
+        self,
+        decision: TradingDecision,
+        current_price: float,
+    ) -> OrderRequest | None:
+        """Convert trading decision into executable order request.
+
+        Performs pre-trade validation and pessimistically reserves
+        required funds/positions before creating the order.
+
+        Args:
+            decision: Trading decision from supervisor.
+            current_price: Current market price for sizing.
+
+        Returns:
+            OrderRequest if order created, None if rejected or neutral.
+
+        Raises:
+            InsufficientFundsError: If not enough cash for buy.
+            InsufficientPositionError: If not enough position for sell.
+        """
+        if decision.action == SignalType.NEUTRAL:
+            return None
+
+        if decision.action == SignalType.EXIT:
+            return self._process_exit(decision, current_price)
+
+        # Determine order side
+        side = OrderSide.BUY if decision.action == SignalType.LONG else OrderSide.SELL
+
+        # Calculate quantity
+        quantity = self.calculate_order_quantity(
+            current_price,
+            decision.quantity_modifier,
+        )
+        if quantity < MIN_QUANTITY:
+            log.warning("Order rejected: quantity below minimum", quantity=quantity)
+            return None
+
+        # Pre-trade validation and reservation
+        reserved_cash: float | None = None
+        reserved_quantity: float | None = None
+
+        if side == OrderSide.BUY:
+            cost = quantity * current_price
+            if self.portfolio.cash < cost:
+                log.warning(
+                    "Order rejected: insufficient funds",
+                    required=cost,
+                    available=self.portfolio.cash,
+                )
+                return None
+
+            # Pessimistic reservation
+            self.portfolio.cash -= cost
+            self.portfolio.blocked_cash += cost
+            reserved_cash = cost
+
+        elif side == OrderSide.SELL:
+            available = self.portfolio.get_available_position(decision.instrument_id)
+            if available < quantity:
+                log.warning(
+                    "Order rejected: insufficient position",
+                    instrument=decision.instrument_id,
+                    required=quantity,
+                    available=available,
+                )
+                return None
+
+            # Pessimistic reservation
+            current_pos = self.portfolio.positions.get(decision.instrument_id, 0.0)
+            self.portfolio.positions[decision.instrument_id] = current_pos - quantity
+            current_blocked = self.portfolio.blocked_positions.get(
+                decision.instrument_id, 0.0
+            )
+            self.portfolio.blocked_positions[decision.instrument_id] = (
+                current_blocked + quantity
+            )
+            reserved_quantity = quantity
+
+        # Create order
+        order = Order(
+            decision_id=str(decision.decision_id),
+            instrument_id=decision.instrument_id,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            status=OrderStatus.SUBMITTED,
+            reserved_cash=reserved_cash,
+            reserved_quantity=reserved_quantity,
+        )
+
+        # Persist atomically
+        self._persist_state(order)
+
+        log.info(
+            "Order created",
+            order_id=order.id,
+            side=side.value,
+            quantity=quantity,
+            instrument=decision.instrument_id,
+        )
+
+        return OrderRequest(
+            oms_order_id=order.id,
+            instrument_id=order.instrument_id,
+            side=order.side,
+            quantity=order.quantity,
+            order_type=order.order_type,
+            time_in_force=order.time_in_force,
+        )
+
+    def _process_exit(
+        self,
+        decision: TradingDecision,
+        current_price: float,
+    ) -> OrderRequest | None:
+        """Process EXIT signal by closing entire position."""
+        position = self.portfolio.get_available_position(decision.instrument_id)
+        if position < MIN_QUANTITY:
+            log.info("No position to exit", instrument=decision.instrument_id)
+            return None
+
+        # Create sell order for entire position
+        self.portfolio.positions[decision.instrument_id] = 0.0
+        current_blocked = self.portfolio.blocked_positions.get(
+            decision.instrument_id, 0.0
+        )
+        self.portfolio.blocked_positions[decision.instrument_id] = (
+            current_blocked + position
+        )
+
+        order = Order(
+            decision_id=str(decision.decision_id),
+            instrument_id=decision.instrument_id,
+            side=OrderSide.SELL,
+            quantity=position,
+            order_type=OrderType.MARKET,
+            status=OrderStatus.SUBMITTED,
+            reserved_quantity=position,
+        )
+
+        self._persist_state(order)
+
+        log.info(
+            "Exit order created",
+            order_id=order.id,
+            quantity=position,
+            instrument=decision.instrument_id,
+        )
+
+        return OrderRequest(
+            oms_order_id=order.id,
+            instrument_id=order.instrument_id,
+            side=order.side,
+            quantity=order.quantity,
+            order_type=order.order_type,
+        )
+
+    def confirm_execution(
+        self,
+        oms_order_id: str,
+        fill_price: float,
+        fill_qty: float,
+        fee: float = 0.0,
+    ) -> None:
+        """Confirm order execution and settle the trade.
+
+        Releases pessimistic reservations and updates portfolio
+        with actual execution results.
+
+        Args:
+            oms_order_id: OMS order ID.
+            fill_price: Execution price.
+            fill_qty: Filled quantity.
+            fee: Transaction fee (deducted from proceeds/added to cost).
+
+        Raises:
+            OrderNotFoundError: If order not found.
+            InvalidOrderStateError: If order in terminal state.
+        """
+        order = self.get_order(oms_order_id)
+        if not order:
+            log.error("Fill confirmation for unknown order", order_id=oms_order_id)
+            raise OrderNotFoundError(oms_order_id)
+
+        if order.is_terminal:
+            log.warning(
+                "Ignoring fill for terminal order",
+                order_id=oms_order_id,
+                status=order.status.value,
+            )
+            return
+
+        # Update order state
+        order.filled_quantity += fill_qty
+        order.average_fill_price = self._calculate_average_price(
+            order.average_fill_price,
+            order.filled_quantity - fill_qty,
+            fill_price,
+            fill_qty,
+        )
+        order.updated_at = datetime.now(timezone.utc)
+
+        if order.filled_quantity >= order.quantity - MIN_QUANTITY:
+            order.status = OrderStatus.FILLED
+        else:
+            order.status = OrderStatus.PARTIALLY_FILLED
+
+        # Settle based on side
+        if order.side == OrderSide.BUY:
+            self._settle_buy(order, fill_price, fill_qty, fee)
+        else:
+            self._settle_sell(order, fill_price, fill_qty, fee)
+
+        self._persist_state(order)
+
+        log.info(
+            "Execution confirmed",
+            order_id=oms_order_id,
+            fill_price=fill_price,
+            fill_qty=fill_qty,
+            status=order.status.value,
+        )
+
+    def _settle_buy(
+        self,
+        order: Order,
+        fill_price: float,
+        fill_qty: float,
+        fee: float,
+    ) -> None:
+        """Settle buy order execution."""
+        reserved = order.reserved_cash or 0.0
+        actual_cost = (fill_qty * fill_price) + fee
+
+        # Release blocked cash
+        self.portfolio.blocked_cash = max(
+            0.0, self.portfolio.blocked_cash - reserved
+        )
+
+        # Return unused cash (slippage/price improvement)
+        cash_delta = reserved - actual_cost
+        self.portfolio.cash += cash_delta
+
+        # Add to position
+        current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
+        self.portfolio.positions[order.instrument_id] = current_pos + fill_qty
+
+    def _settle_sell(
+        self,
+        order: Order,
+        fill_price: float,
+        fill_qty: float,
+        fee: float,
+    ) -> None:
+        """Settle sell order execution."""
+        reserved = order.reserved_quantity or order.quantity
+
+        # Release blocked position
+        blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
+        self.portfolio.blocked_positions[order.instrument_id] = max(
+            0.0, blocked - reserved
+        )
+
+        # Return unfilled quantity to position
+        unfilled = max(0.0, reserved - fill_qty)
+        if unfilled > MIN_QUANTITY:
+            current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
+            self.portfolio.positions[order.instrument_id] = current_pos + unfilled
+
+        # Add proceeds to cash
+        proceeds = (fill_qty * fill_price) - fee
+        self.portfolio.cash += proceeds
+
+    def _calculate_average_price(
+        self,
+        current_avg: float | None,
+        current_qty: float,
+        new_price: float,
+        new_qty: float,
+    ) -> float:
+        """Calculate volume-weighted average price."""
+        if current_avg is None or current_qty == 0:
+            return new_price
+
+        total_value = (current_avg * current_qty) + (new_price * new_qty)
+        total_qty = current_qty + new_qty
+        return total_value / total_qty if total_qty > 0 else new_price
+
+    def revert_allocation(self, oms_order_id: str) -> None:
+        """Revert pessimistic reservations on order failure.
+
+        Called when EMS fails to submit order or order is rejected.
+
+        Args:
+            oms_order_id: OMS order ID.
+
+        Raises:
+            OrderNotFoundError: If order not found.
+        """
+        order = self.get_order(oms_order_id)
+        if not order:
+            log.error("Cannot revert unknown order", order_id=oms_order_id)
+            raise OrderNotFoundError(oms_order_id)
+
+        if order.is_terminal:
+            log.warning(
+                "Cannot revert terminal order",
+                order_id=oms_order_id,
+                status=order.status.value,
+            )
+            return
+
+        if order.side == OrderSide.BUY:
+            reserved = order.reserved_cash or 0.0
+            self.portfolio.cash += reserved
+            self.portfolio.blocked_cash = max(
+                0.0, self.portfolio.blocked_cash - reserved
+            )
+        else:
+            reserved = order.reserved_quantity or order.quantity
+            blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
+            self.portfolio.blocked_positions[order.instrument_id] = max(
+                0.0, blocked - reserved
+            )
+            current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
+            self.portfolio.positions[order.instrument_id] = current_pos + reserved
+
+        order.status = OrderStatus.FAILED
+        order.updated_at = datetime.now(timezone.utc)
+
+        self._persist_state(order)
+
+        log.warning(
+            "Order allocation reverted",
+            order_id=oms_order_id,
+            side=order.side.value,
+        )
+
+    def cancel_order(self, oms_order_id: str) -> bool:
+        """Cancel an order and revert its reservations.
+
+        Args:
+            oms_order_id: OMS order ID.
+
+        Returns:
+            True if cancelled, False if already terminal.
+        """
+        order = self.get_order(oms_order_id)
+        if not order:
+            raise OrderNotFoundError(oms_order_id)
+
+        if order.is_terminal:
+            return False
+
+        # Revert allocations same as failure
+        if order.side == OrderSide.BUY:
+            reserved = order.reserved_cash or 0.0
+            self.portfolio.cash += reserved
+            self.portfolio.blocked_cash = max(
+                0.0, self.portfolio.blocked_cash - reserved
+            )
+        else:
+            reserved = order.reserved_quantity or order.quantity
+            blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
+            self.portfolio.blocked_positions[order.instrument_id] = max(
+                0.0, blocked - reserved
+            )
+            current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
+            self.portfolio.positions[order.instrument_id] = current_pos + reserved
+
+        order.status = OrderStatus.CANCELLED
+        order.updated_at = datetime.now(timezone.utc)
+
+        self._persist_state(order)
+
+        log.info("Order cancelled", order_id=oms_order_id)
+        return True
+
+    def get_open_orders(self) -> list[Order]:
+        """Get all non-terminal orders.
+
+        Note: This is an expensive operation requiring key scanning.
+        Consider caching or maintaining an index for production use.
+        """
+        # This is a simplified implementation
+        # In production, maintain a separate index of open order IDs
+        return []
+
+    def reconcile(self) -> None:
+        """Reconcile portfolio state after crash recovery.
+
+        TODO: Implement crash recovery logic:
+        1. Scan for orders in SUBMITTED/PARTIALLY_FILLED state
+        2. Query EMS for actual fill status
+        3. Reconcile blocked amounts with actual order state
+        """
+        log.info("Portfolio reconciliation started")
+        # Implementation depends on EMS capabilities
+        log.info("Portfolio reconciliation complete")

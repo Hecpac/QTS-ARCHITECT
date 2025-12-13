@@ -1,0 +1,45 @@
+defaults:
+  - gateway: mock
+  - store: redis
+  - _self_
+
+env: "dev"
+symbol: "BTC/USDT"
+
+oms:
+  initial_cash: 100000.0
+  risk_fraction: 0.10
+
+agents:
+  strategies:
+    - _target_: qts_core.agents.base.TechnicalAgent
+      name: TrendFollower_A
+    - _target_: qts_core.agents.base.TechnicalAgent
+      name: MeanReversion_B
+    - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
+      name: ICT_Sniper_NY
+      symbol: BTC/USDT
+      session_start: 0
+      session_end: 24
+  risk:
+    _target_: qts_core.agents.base.StrictRiskAgent
+    name: GlobalRiskOfficer
+
+loop:
+  tick_interval: 10.0
+  heartbeat_key: "SYSTEM:HEARTBEAT"
+
+trading:
+  timeframe: "1h"
+
+telemetry:
+  publish_views: true
+  metrics_keys:
+    total_value: "METRICS:TOTAL_VALUE"
+    cash: "METRICS:CASH"
+    pnl_daily: "METRICS:PNL_DAILY"
+  orders_key: "VIEW:ORDERS"
+  positions_key: "VIEW:POSITIONS"
+  last_price_key: "MARKET:LAST_PRICE"
+  last_tick_key: "MARKET:LAST_TICK"
+  ohlcv_key: "MARKET:OHLCV"

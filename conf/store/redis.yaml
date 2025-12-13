@@ -1,0 +1,3 @@
+_target_: qts_core.execution.store.RedisStore
+# Use env override in Docker (or any deployment), default to local Redis.
+redis_url: ${oc.env:REDIS_URL,redis://localhost:6379/0}

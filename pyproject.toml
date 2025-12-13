@@ -1,0 +1,275 @@
+# ==============================================================================
+# QTS-ARCHITECT - Quantitative Trading System
+# ==============================================================================
+# Single source of truth for dependencies, tooling, and project metadata.
+# All configuration lives here - no scattered setup.cfg or .ini files.
+# ==============================================================================
+
+[tool.poetry]
+name = "qts-core"
+version = "0.1.0"
+description = "Institutional-grade Quantitative Trading System"
+authors = ["QTS Architect <architect@qts.com>"]
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/qts-architect/qts-core"
+keywords = ["trading", "quantitative-finance", "algorithmic-trading", "crypto"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+packages = [
+    { include = "qts_core", from = "qts_core/src" }
+]
+
+[tool.poetry.scripts]
+# CLI entrypoints
+qts = "qts_core.main:main"
+qts-live = "qts_core.main_live:app"
+
+# ==============================================================================
+# Dependencies
+# ==============================================================================
+# Pinned to minor versions for reproducibility while allowing patch updates.
+# Security patches should be applied via `poetry update`.
+# ==============================================================================
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+# Core Data Processing
+polars = "^1.0.0"              # High-performance DataFrame library
+numpy = "^1.24.0"              # Numerical computing foundation
+pandas = "^2.1.0"              # Required by some dependencies (ccxt, hmmlearn)
+
+# Configuration & Validation
+hydra-core = "^1.3.0"          # Hierarchical configuration management
+pydantic = "^2.0.0"            # Data validation with type hints
+
+# Storage
+duckdb = ">=1.0.0,<2.0.0"      # Embedded OLAP database
+redis = "^5.0.0"               # State persistence and pub/sub
+
+# Exchange Connectivity
+ccxt = "^4.0.0"                # Unified crypto exchange API
+tenacity = "^8.0.0"            # Retry logic with exponential backoff
+
+# Machine Learning
+hmmlearn = "^0.3.0"            # Hidden Markov Models for regime detection
+joblib = "^1.3.0"              # Model serialization
+
+# Observability
+structlog = "^23.1.0"          # Structured logging (JSON output)
+
+# Dashboard
+streamlit = "^1.30.0"          # Web-based monitoring UI
+plotly = "^5.22.0"             # Interactive charting
+
+[tool.poetry.group.dev.dependencies]
+# Linting & Formatting
+ruff = "^0.8.0"                # Fast Python linter + formatter
+
+# Type Checking
+mypy = "^1.0.0"                # Static type checker
+types-redis = "^4.6.0"         # Type stubs for redis
+
+# Testing
+pytest = "^8.0.0"              # Test framework
+pytest-asyncio = "^0.23.0"     # Async test support
+pytest-cov = "^4.1.0"          # Coverage reporting
+hypothesis = "^6.0.0"          # Property-based testing
+
+# Documentation
+mkdocs = "^1.5.0"              # Documentation generator
+mkdocs-material = "^9.0.0"     # Material theme
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# ==============================================================================
+# RUFF CONFIGURATION
+# ==============================================================================
+# Draconian linting rules. Code quality is non-negotiable.
+# Run: `ruff check .` and `ruff format .`
+# ==============================================================================
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+# Exclude generated files and virtual environments
+exclude = [
+    ".venv",
+    "__pycache__",
+    ".git",
+    "outputs",
+    "multirun",
+]
+
+[tool.ruff.format]
+# Use double quotes for strings (consistency with Black)
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = [
+    # Core
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    
+    # Import organization
+    "I",     # isort
+    
+    # Code quality
+    "B",     # flake8-bugbear (common bugs)
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+    "UP",    # pyupgrade (modern Python)
+    
+    # Naming
+    "N",     # pep8-naming
+    
+    # Type checking
+    "TCH",   # flake8-type-checking (TYPE_CHECKING blocks)
+    "ANN",   # flake8-annotations
+    
+    # Documentation
+    "D",     # pydocstyle
+    
+    # Security
+    "S",     # flake8-bandit (security)
+    
+    # Pylint subset
+    "PL",    # pylint
+    
+    # Ruff-specific
+    "RUF",   # ruff rules
+    
+    # Async
+    "ASYNC", # flake8-async
+]
+
+ignore = [
+    "D100",  # Missing docstring in public module (handled at class/function level)
+    "D104",  # Missing docstring in public package
+    "D203",  # 1 blank line required before class docstring (conflicts with D211)
+    "D213",  # Multi-line docstring summary should start at the second line (conflicts with D212)
+    "ANN101", # Missing type annotation for self
+    "ANN102", # Missing type annotation for cls
+    "S101",  # Use of assert (needed in tests)
+    "PLR0913", # Too many arguments (sometimes necessary)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["qts_core"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can have magic values and assertions
+"tests/**/*.py" = ["S101", "PLR2004", "ANN"]
+# Allow print in scripts
+"scripts/**/*.py" = ["T201"]
+
+# ==============================================================================
+# MYPY CONFIGURATION
+# ==============================================================================
+# Strict typing. No `Any` unless explicitly justified with a comment.
+# Run: `mypy src/`
+# ==============================================================================
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+# Error output
+show_error_codes = true
+show_error_context = true
+pretty = true
+
+# Strict mode components (explicit for clarity)
+warn_unused_configs = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+strict_concatenate = true
+
+# Third-party library stubs
+[[tool.mypy.overrides]]
+module = [
+    "hydra.*",
+    "omegaconf.*",
+    "polars.*",
+    "structlog.*",
+    "duckdb.*",
+    "ccxt.*",
+    "hmmlearn.*",
+    "joblib.*",
+    "streamlit.*",
+    "plotly.*",
+    "tenacity.*",
+]
+ignore_missing_imports = true
+
+# ==============================================================================
+# PYTEST CONFIGURATION
+# ==============================================================================
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+addopts = [
+    "-ra",                    # Show summary of all except passed
+    "-q",                     # Quiet mode
+    "--strict-markers",       # Fail on unknown markers
+    "--strict-config",        # Fail on config errors
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+
+# Custom markers
+markers = [
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+    "integration: marks tests requiring external services",
+]
+
+# ==============================================================================
+# COVERAGE CONFIGURATION
+# ==============================================================================
+
+[tool.coverage.run]
+# Canonical package code lives under qts_core/src/qts_core
+source = ["qts_core/src/qts_core"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+fail_under = 80
+show_missing = true

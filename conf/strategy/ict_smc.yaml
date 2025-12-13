@@ -1,0 +1,24 @@
+# ==============================================================================
+# Strategy Configuration: ICT Smart Money Concepts
+# ==============================================================================
+# Instantiated via: hydra.utils.instantiate(cfg.strategy)
+# Implements Fair Value Gap detection with kill zone filtering
+# ==============================================================================
+
+_target_: qts_core.agents.ict.ICTSmartMoneyAgent
+
+# Agent Identity
+name: "ICT_SmartMoney_NY"
+symbol: "BTC/USDT"
+
+# Kill Zone Configuration (UTC hours)
+# NY Session: 13:00-16:00 UTC (8am-11am EST)
+session_start: 13
+session_end: 16
+
+# Signal Parameters
+min_confidence: 0.70      # Minimum confidence threshold
+min_fvg_size: 0.001       # Minimum FVG size as fraction (0.001 = 0.1%)
+
+# NOTE: Risk/portfolio constraints belong in the risk layer / supervisor config,
+# not in the strategy constructor (Hydra would pass these as kwargs).

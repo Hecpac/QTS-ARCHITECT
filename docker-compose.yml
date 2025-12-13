@@ -1,0 +1,55 @@
+services:
+  redis:
+    image: redis:alpine
+    container_name: qts_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qts_trader
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./logs:/app/logs
+      - ./conf:/app/conf:ro
+      # Optional: persist Hydra outputs for debugging without tracking in git
+      - ./outputs:/app/outputs
+      - ./multirun:/app/multirun
+    # Use env-driven config (conf/store/redis.yaml reads REDIS_URL)
+    command: python -m qts_core.main_live
+    restart: on-failure
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qts_dashboard
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./conf:/app/conf:ro
+    # Avoid coupling to repo paths inside the container: resolve the Streamlit app via import.
+    command: >
+      sh -c "streamlit run $(python -c 'import qts_core.dashboard.app as app; print(app.__file__)') --server.port 8501 --server.address 0.0.0.0"
+    restart: always
