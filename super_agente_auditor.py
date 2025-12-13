@@ -550,18 +550,20 @@ class SuperAgenteAuditor:
             PerformanceAnalyzer(self.project_path)
         ]
     
-    def run_audit(self) -> AuditReport:
+    def run_audit(self, verbose: bool = True) -> AuditReport:
         """Run complete audit of the project"""
-        print(f"\n{'='*80}")
-        print("SUPER AGENTE AUDITOR - Project Analysis")
-        print(f"{'='*80}\n")
-        print(f"Analyzing project: {self.project_path}")
-        print(f"Timestamp: {self.report.timestamp}\n")
+        if verbose:
+            print(f"\n{'='*80}")
+            print("SUPER AGENTE AUDITOR - Project Analysis")
+            print(f"{'='*80}\n")
+            print(f"Analyzing project: {self.project_path}")
+            print(f"Timestamp: {self.report.timestamp}\n")
         
         # Run all analyzers
         for analyzer in self.analyzers:
-            analyzer_name = analyzer.__class__.__name__
-            print(f"Running {analyzer_name}...")
+            if verbose:
+                analyzer_name = analyzer.__class__.__name__
+                print(f"Running {analyzer_name}...")
             analyzer.analyze(self.report)
         
         # Calculate statistics
@@ -616,11 +618,12 @@ class SuperAgenteAuditor:
         
         print(f"\n{'='*80}\n")
     
-    def save_report(self, output_file: str = "audit_report.json"):
+    def save_report(self, output_file: str = "audit_report.json", verbose: bool = True):
         """Save the audit report to a JSON file"""
         output_path = Path(output_file)
         output_path.write_text(self.report.to_json())
-        print(f"\nReport saved to: {output_path.resolve()}")
+        if verbose:
+            print(f"\nReport saved to: {output_path.resolve()}")
 
 
 def main():
@@ -649,16 +652,19 @@ def main():
     
     args = parser.parse_args()
     
+    # Determine verbosity
+    verbose = not args.json_only
+    
     # Create and run auditor
     auditor = SuperAgenteAuditor(args.path)
-    auditor.run_audit()
+    auditor.run_audit(verbose=verbose)
     
     # Print report unless json-only mode
     if not args.json_only:
         auditor.print_report()
     
     # Save report to file
-    auditor.save_report(args.output)
+    auditor.save_report(args.output, verbose=verbose)
     
     # Return exit code based on critical findings
     critical_count = auditor.report.statistics['by_severity']['critical']

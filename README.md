@@ -15,6 +15,8 @@ A comprehensive project auditor that analyzes and audits complete project struct
 
 ### 🚀 Quick Start
 
+**New to the auditor?** Start with the [Quick Start Guide](QUICKSTART.md)
+
 Run the auditor on your project:
 
 ```bash
