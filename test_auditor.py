@@ -189,9 +189,9 @@ class TestSecurityAnalyzer(unittest.TestCase):
     
     def test_detect_exposed_secrets(self):
         """Test detection of exposed secrets"""
-        # Create a file with an API key
+        # Create a file with an API key (realistic length)
         test_file = self.test_path / "config.py"
-        test_file.write_text('api_key = "sk-1234567890abcdef"')
+        test_file.write_text('api_key = "sk-1234567890abcdef1234567890abcdef"')
         
         analyzer = SecurityAnalyzer(self.test_path)
         self.assertTrue(analyzer._check_exposed_secrets())

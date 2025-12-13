@@ -411,21 +411,51 @@ class SecurityAnalyzer:
     
     def _check_exposed_secrets(self) -> bool:
         """Check for exposed secrets in code"""
+        # Improved patterns that avoid common false positives
         secret_patterns = [
-            r'api[_-]?key\s*=\s*["\'][^"\']+["\']',
-            r'password\s*=\s*["\'][^"\']+["\']',
-            r'secret\s*=\s*["\'][^"\']+["\']',
-            r'token\s*=\s*["\'][^"\']+["\']'
+            # API keys with actual values (not env vars or placeholders)
+            r'api[_-]?key\s*=\s*["\'][a-zA-Z0-9_\-]{20,}["\']',
+            # Passwords with actual values (not env vars or placeholders)
+            r'password\s*=\s*["\'](?!.*(?:env|ENV|test|example|placeholder|changeme|password))[^"\']{8,}["\']',
+            # Secrets with actual values
+            r'secret[_-]?key\s*=\s*["\'][a-zA-Z0-9_\-]{20,}["\']',
+            # Tokens with actual values
+            r'(?:access|auth)[_-]?token\s*=\s*["\'][a-zA-Z0-9_\-]{20,}["\']',
+            # AWS keys
+            r'aws[_-]?(?:access|secret)[_-]?key[_-]?id\s*=\s*["\'][A-Z0-9]{20,}["\']',
         ]
         
-        for file_path in self.project_path.rglob('*.py'):
-            try:
-                content = file_path.read_text()
-                for pattern in secret_patterns:
-                    if re.search(pattern, content, re.IGNORECASE):
-                        return True
-            except Exception:
-                pass
+        # File extensions to check for secrets
+        file_extensions = ['*.py', '*.js', '*.ts', '*.jsx', '*.tsx', '*.json', 
+                          '*.yaml', '*.yml', '*.env', '*.config', '*.conf']
+        
+        for ext in file_extensions:
+            for file_path in self.project_path.rglob(ext):
+                # Skip common directories that shouldn't contain secrets
+                if any(part in file_path.parts for part in ['.git', '__pycache__', 'node_modules', 'venv', '.venv']):
+                    continue
+                
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+                    # Skip files that are clearly test or example files
+                    if any(marker in content.lower() for marker in ['this is a test', 'example only', 'placeholder']):
+                        continue
+                    
+                    for pattern in secret_patterns:
+                        if re.search(pattern, content, re.IGNORECASE):
+                            # Additional check: ensure it's not in a comment
+                            matches = re.finditer(pattern, content, re.IGNORECASE)
+                            for match in matches:
+                                # Get the line containing the match
+                                start = content.rfind('\n', 0, match.start()) + 1
+                                line = content[start:content.find('\n', match.start())]
+                                # Check if it's not a comment
+                                stripped = line.strip()
+                                if not (stripped.startswith('#') or stripped.startswith('//')):
+                                    return True
+                except (UnicodeDecodeError, PermissionError, OSError):
+                    # Skip files that can't be read (binary files, permission issues, etc.)
+                    continue
         
         return False
     
