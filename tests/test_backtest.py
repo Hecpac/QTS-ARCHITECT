@@ -149,20 +149,30 @@ class TestMetricsCalculator:
         assert vol == pytest.approx(expected)
 
     def test_var_95(self) -> None:
-        """Test 95% Value at Risk."""
-        # Generate returns where 5th percentile is clear
+        """Test empirical 95% Value at Risk from worst-tail bucket."""
         returns = np.array([-0.05, -0.03, -0.01, 0.0, 0.01, 0.02, 0.03])
         calc = MetricsCalculator(returns)
 
         var = calc.var_95()
-        assert var == pytest.approx(np.percentile(returns, 5))
+
+        tail_count = max(1, int(np.ceil(len(returns) * 0.05)))
+        expected_tail = np.partition(returns, tail_count - 1)[:tail_count]
+        expected_var = float(np.max(expected_tail))
+
+        assert var == pytest.approx(expected_var)
 
     def test_cvar_95(self) -> None:
-        """Test Conditional VaR (Expected Shortfall)."""
+        """Test empirical Conditional VaR (Expected Shortfall)."""
         returns = np.array([-0.10, -0.05, -0.02, 0.0, 0.01, 0.02, 0.05])
         calc = MetricsCalculator(returns)
 
         cvar = calc.cvar_95()
+
+        tail_count = max(1, int(np.ceil(len(returns) * 0.05)))
+        expected_tail = np.partition(returns, tail_count - 1)[:tail_count]
+        expected_cvar = float(np.mean(expected_tail))
+
+        assert cvar == pytest.approx(expected_cvar)
         # CVaR should be at least as bad as VaR
         assert cvar <= calc.var_95()
 

@@ -162,6 +162,9 @@ class MetricsCalculator:
         # Pre-compute equity curve
         self._equity_curve = np.cumprod(1 + self.returns)
 
+        # Cached left-tail risk metrics (VaR/CVaR at 95%).
+        self._tail_risk_95_cache: tuple[float, float] | None = None
+
     def calculate(
         self,
         start_date: datetime | None = None,
@@ -206,8 +209,7 @@ class MetricsCalculator:
         # Distribution
         skew = self.skewness()
         kurt = self.kurtosis()
-        var = self.var_95()
-        cvar = self.cvar_95()
+        var, cvar = self._tail_risk_95()
 
         # Win/Loss
         wins = self.returns[self.returns > 0]
@@ -526,30 +528,50 @@ class MetricsCalculator:
         m4 = np.mean((self.returns - mean) ** 4)
         return float(m4 / (std**4) - 3)  # Excess kurtosis
 
-    def var_95(self) -> float:
-        """Calculate Value at Risk at 95% confidence.
+    def _tail_risk_95(self) -> tuple[float, float]:
+        """Compute (VaR_95, CVaR_95) from the empirical worst 5% tail.
 
-        Returns the 5th percentile of returns (loss threshold).
+        Uses ``np.partition`` to select the left-tail bucket in linear time,
+        avoiding full sort/percentile overhead.
         """
-        if len(self.returns) == 0:
-            return 0.0
-        return float(np.percentile(self.returns, 5))
+        if self._tail_risk_95_cache is not None:
+            return self._tail_risk_95_cache
+
+        n = len(self.returns)
+        if n == 0:
+            self._tail_risk_95_cache = (0.0, 0.0)
+            return self._tail_risk_95_cache
+
+        alpha = 0.05
+        tail_count = max(1, int(np.ceil(n * alpha)))
+        kth = tail_count - 1
+
+        # Partition copy: first ``tail_count`` elements are the worst returns
+        # (unordered), enough for empirical VaR/CVaR computation.
+        partitioned = np.partition(self.returns, kth)
+        tail = partitioned[:tail_count]
+
+        var_95 = float(np.max(tail))
+        cvar_95 = float(np.mean(tail))
+
+        self._tail_risk_95_cache = (var_95, cvar_95)
+        return self._tail_risk_95_cache
+
+    def var_95(self) -> float:
+        """Calculate empirical Value at Risk at 95% confidence.
+
+        Returns the least severe return inside the worst 5% tail.
+        """
+        var, _ = self._tail_risk_95()
+        return var
 
     def cvar_95(self) -> float:
-        """Calculate Conditional VaR (Expected Shortfall) at 95%.
+        """Calculate empirical Conditional VaR (Expected Shortfall) at 95%.
 
-        Average return in the worst 5% of cases.
+        Returns the average return across the worst 5% tail.
         """
-        if len(self.returns) == 0:
-            return 0.0
-
-        var = self.var_95()
-        tail = self.returns[self.returns <= var]
-
-        if len(tail) == 0:
-            return var
-
-        return float(np.mean(tail))
+        _, cvar = self._tail_risk_95()
+        return cvar
 
     # ==========================================================================
     # Win/Loss Metrics
