@@ -9,9 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
 from qts_core.agents.base import StrictRiskAgent, TechnicalAgent
-from qts_core.agents.protocol import SignalType
+from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.agents.supervisor import Supervisor
 from qts_core.common.types import InstrumentId, MarketData
+from qts_core.main_live import apply_execution_guardrails
 from qts_core.execution.ems import ExecutionGateway, FillReport
 from qts_core.execution.oms import Order, OrderManagementSystem, OrderStatus, Portfolio
 from qts_core.execution.store import MemoryStore
@@ -102,3 +103,96 @@ def test_bullish_tick_creates_and_settles_order():
         assert portfolio.blocked_positions.get(instrument, 0.0) == pytest.approx(0.0)
 
     asyncio.run(run_flow())
+
+
+def test_guardrails_reject_low_volume():
+    instrument = InstrumentId("BTC/USDT")
+    decision = TradingDecision(
+        instrument_id=instrument,
+        action=SignalType.LONG,
+        quantity_modifier=1.0,
+        rationale="test",
+    )
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=101.0,
+        volume=0.05,
+    )
+
+    guarded = apply_execution_guardrails(
+        decision,
+        market_data,
+        enabled=True,
+        min_volume=0.10,
+    )
+
+    assert guarded is None
+
+
+def test_guardrails_reduce_size_in_high_volatility():
+    instrument = InstrumentId("BTC/USDT")
+    decision = TradingDecision(
+        instrument_id=instrument,
+        action=SignalType.LONG,
+        quantity_modifier=0.8,
+        rationale="test",
+    )
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=112.0,
+        low=98.0,
+        close=100.0,
+        volume=2.0,
+    )
+
+    guarded = apply_execution_guardrails(
+        decision,
+        market_data,
+        enabled=True,
+        min_volume=0.1,
+        max_intrabar_volatility=0.05,
+        high_volatility_size_scale=0.5,
+        max_estimated_slippage_bps=1_000.0,
+    )
+
+    assert guarded is not None
+    assert guarded.quantity_modifier == pytest.approx(0.4)
+    assert "Guardrail: high volatility" in guarded.rationale
+
+
+def test_guardrails_reject_high_estimated_slippage():
+    instrument = InstrumentId("BTC/USDT")
+    decision = TradingDecision(
+        instrument_id=instrument,
+        action=SignalType.LONG,
+        quantity_modifier=1.0,
+        rationale="test",
+    )
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=110.0,
+        low=90.0,
+        close=100.0,
+        volume=5.0,
+    )
+
+    guarded = apply_execution_guardrails(
+        decision,
+        market_data,
+        enabled=True,
+        min_volume=0.1,
+        max_intrabar_volatility=1.0,
+        high_volatility_size_scale=1.0,
+        max_estimated_slippage_bps=20.0,
+        slippage_volatility_factor=0.25,
+    )
+
+    assert guarded is None

@@ -30,6 +30,14 @@ loop:
   heartbeat_key: "SYSTEM:HEARTBEAT"
   execution_timeout: 20.0
 
+execution_guardrails:
+  enabled: true
+  min_volume: 0.10
+  max_intrabar_volatility: 0.05
+  high_volatility_size_scale: 0.50
+  max_estimated_slippage_bps: 75.0
+  slippage_volatility_factor: 0.25
+
 trading:
   timeframe: "1h"
 

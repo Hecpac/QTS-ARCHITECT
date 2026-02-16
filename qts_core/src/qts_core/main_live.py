@@ -12,6 +12,7 @@ import structlog
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from qts_core.agents.protocol import TradingDecision
 from qts_core.agents.supervisor import Supervisor
 from qts_core.common.types import InstrumentId, MarketData
 from qts_core.execution.oms import OrderManagementSystem, OrderRequest
@@ -24,6 +25,70 @@ if TYPE_CHECKING:
 OHLCVTuple = tuple[datetime, float, float, float, float, float]
 
 log = structlog.get_logger()
+
+
+def apply_execution_guardrails(
+    decision: TradingDecision,
+    market_data: MarketData,
+    *,
+    enabled: bool = True,
+    min_volume: float = 0.0,
+    max_intrabar_volatility: float = 0.05,
+    high_volatility_size_scale: float = 0.5,
+    max_estimated_slippage_bps: float = 50.0,
+    slippage_volatility_factor: float = 0.25,
+) -> TradingDecision | None:
+    """Apply market microstructure guardrails to a trading decision.
+
+    Returns:
+        - None if the trade should be rejected.
+        - Original or adjusted TradingDecision otherwise.
+    """
+    if not enabled:
+        return decision
+
+    if market_data.close <= 0:
+        return None
+
+    if min_volume > 0 and market_data.volume < min_volume:
+        return None
+
+    intrabar_volatility = max(0.0, (market_data.high - market_data.low) / market_data.close)
+    estimated_slippage_bps = intrabar_volatility * slippage_volatility_factor * 10_000
+
+    if max_estimated_slippage_bps > 0 and estimated_slippage_bps > max_estimated_slippage_bps:
+        return None
+
+    adjusted_modifier = decision.quantity_modifier
+    rationale_suffix: list[str] = []
+
+    if (
+        max_intrabar_volatility > 0
+        and intrabar_volatility > max_intrabar_volatility
+        and high_volatility_size_scale < 1.0
+    ):
+        adjusted_modifier *= max(0.0, high_volatility_size_scale)
+        rationale_suffix.append(
+            f"Guardrail: high volatility {intrabar_volatility:.2%}"
+        )
+
+    adjusted_modifier = max(0.0, min(1.0, adjusted_modifier))
+    if adjusted_modifier < 1e-8:
+        return None
+
+    if adjusted_modifier == decision.quantity_modifier and not rationale_suffix:
+        return decision
+
+    rationale = decision.rationale
+    if rationale_suffix:
+        rationale = f"{rationale} | {'; '.join(rationale_suffix)}"
+
+    return decision.model_copy(
+        update={
+            "quantity_modifier": adjusted_modifier,
+            "rationale": rationale,
+        }
+    )
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -53,6 +118,31 @@ class LiveTrader:
             0.1,
             float(cfg.loop.get("execution_timeout", max(5.0, self.tick_interval * 2))),
         )
+
+        guardrails_cfg = cfg.get("execution_guardrails")
+        self.guardrails_enabled: bool = bool(
+            guardrails_cfg.get("enabled", True) if guardrails_cfg else True
+        )
+        self.guardrails_min_volume: float = float(
+            guardrails_cfg.get("min_volume", 0.0) if guardrails_cfg else 0.0
+        )
+        self.guardrails_max_intrabar_volatility: float = float(
+            guardrails_cfg.get("max_intrabar_volatility", 0.05)
+            if guardrails_cfg else 0.05
+        )
+        self.guardrails_high_volatility_size_scale: float = float(
+            guardrails_cfg.get("high_volatility_size_scale", 0.5)
+            if guardrails_cfg else 0.5
+        )
+        self.guardrails_max_estimated_slippage_bps: float = float(
+            guardrails_cfg.get("max_estimated_slippage_bps", 50.0)
+            if guardrails_cfg else 50.0
+        )
+        self.guardrails_slippage_volatility_factor: float = float(
+            guardrails_cfg.get("slippage_volatility_factor", 0.25)
+            if guardrails_cfg else 0.25
+        )
+
         self._last_market_data: MarketData | None = None
         self._last_ohlcv_history: list[OHLCVTuple] | None = None
         self._last_ohlcv_payload: list[dict[str, Any]] | None = None
@@ -314,8 +404,30 @@ class LiveTrader:
                 if not decision:
                     continue
 
-                order_request = self.oms.process_decision(
+                guarded_decision = apply_execution_guardrails(
                     decision,
+                    market_data,
+                    enabled=self.guardrails_enabled,
+                    min_volume=self.guardrails_min_volume,
+                    max_intrabar_volatility=self.guardrails_max_intrabar_volatility,
+                    high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
+                    max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
+                    slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
+                )
+                if not guarded_decision:
+                    log.warning(
+                        "Order rejected by execution guardrails",
+                        instrument=market_data.instrument_id,
+                        volume=market_data.volume,
+                        intrabar_volatility=max(
+                            0.0,
+                            (market_data.high - market_data.low) / market_data.close,
+                        ),
+                    )
+                    continue
+
+                order_request = self.oms.process_decision(
+                    guarded_decision,
                     current_price=market_data.close,
                 )
                 if not order_request:
