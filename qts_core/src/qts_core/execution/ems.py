@@ -36,7 +36,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from qts_core.execution.oms import OrderRequest
+from qts_core.execution.oms import AccountMode, OrderRequest
 
 if TYPE_CHECKING:
     pass
@@ -366,6 +366,7 @@ class CCXTGateway:
         password: str = "",
         sandbox: bool = True,
         paper_trading: bool = False,
+        account_mode: AccountMode | str = AccountMode.SPOT,
         rate_limit: float = DEFAULT_RATE_LIMIT_PER_SECOND,
         circuit_breaker_threshold: int = DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
         circuit_breaker_timeout: float = DEFAULT_CIRCUIT_BREAKER_TIMEOUT,
@@ -382,6 +383,7 @@ class CCXTGateway:
             password: API password (some exchanges require this).
             sandbox: Use sandbox/testnet mode.
             paper_trading: Simulate execution without real orders.
+            account_mode: Account mode (spot/margin/perp) for order params.
             rate_limit: Requests per second.
             circuit_breaker_threshold: Failures before opening circuit.
             circuit_breaker_timeout: Seconds before retry after circuit opens.
@@ -399,6 +401,10 @@ class CCXTGateway:
         self.password = password
         self.sandbox = sandbox
         self.paper_trading = paper_trading
+        self.account_mode = (
+            account_mode if isinstance(account_mode, AccountMode)
+            else AccountMode(str(account_mode).lower())
+        )
 
         # Configuration
         self.max_retries = max_retries
@@ -551,14 +557,28 @@ class CCXTGateway:
             status=ExecutionStatus.SUCCESS,
         )
 
+    def _build_create_order_payload(
+        self,
+        order: OrderRequest,
+    ) -> tuple[str, str, str, float, float | None, dict[str, bool]]:
+        """Build normalized create_order payload for CCXT."""
+        symbol = str(order.instrument_id)
+        order_type = order.order_type.value.lower()
+        side = order.side.value.lower()
+        amount = float(order.quantity)
+        price = float(order.limit_price) if order.limit_price is not None else None
+
+        params: dict[str, bool] = {}
+        if order.reduce_only and self.account_mode in {AccountMode.MARGIN, AccountMode.PERP}:
+            params["reduceOnly"] = True
+
+        return symbol, order_type, side, amount, price, params
+
     async def _execute_with_retry(self, order: OrderRequest) -> FillReport | None:
         """Execute order with retry logic."""
         import ccxt.async_support as ccxt
 
-        symbol = str(order.instrument_id)
-        side = order.side.value.lower()
-        order_type = order.order_type.value.lower()
-        amount = order.quantity
+        symbol, order_type, side, amount, price, params = self._build_create_order_payload(order)
 
         @retry(
             stop=stop_after_attempt(self.max_retries),
@@ -577,11 +597,13 @@ class CCXTGateway:
             ),
         )
         async def _submit() -> dict:
-            kwargs = {}
-            if order.limit_price is not None:
-                kwargs["price"] = order.limit_price
             return await self.exchange.create_order(
-                symbol, order_type, side, amount, **kwargs
+                symbol,
+                order_type,
+                side,
+                amount,
+                price,
+                params,
             )
 
         log.info(
@@ -591,6 +613,7 @@ class CCXTGateway:
             type=order_type,
             amount=amount,
             order_id=order.oms_order_id,
+            reduce_only=bool(params.get("reduceOnly", False)),
         )
 
         try:

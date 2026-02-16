@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Final
 
@@ -99,6 +98,23 @@ class TimeInForce(str, Enum):
     DAY = "DAY"  # Day order
 
 
+class AccountMode(str, Enum):
+    """Execution account mode."""
+
+    SPOT = "spot"
+    MARGIN = "margin"
+    PERP = "perp"
+
+
+class OrderIntent(str, Enum):
+    """Semantic intent behind an order."""
+
+    OPEN_LONG = "OPEN_LONG"
+    OPEN_SHORT = "OPEN_SHORT"
+    CLOSE_LONG = "CLOSE_LONG"
+    CLOSE_SHORT = "CLOSE_SHORT"
+
+
 # ==============================================================================
 # Custom Exceptions
 # ==============================================================================
@@ -161,6 +177,7 @@ class Order(BaseModel):
         decision_id: Reference to TradingDecision that triggered this order.
         instrument_id: Trading pair/instrument identifier.
         side: Buy or sell.
+        intent: Semantic intent (open/close long/short).
         quantity: Order quantity.
         order_type: Execution type (MARKET, LIMIT, etc.).
         status: Current lifecycle state.
@@ -176,6 +193,7 @@ class Order(BaseModel):
         average_fill_price: Average price of fills.
         created_at: Order creation timestamp.
         updated_at: Last update timestamp.
+        reduce_only: Whether execution must only reduce an existing position.
         external_id: Exchange/broker order ID.
     """
 
@@ -185,6 +203,7 @@ class Order(BaseModel):
     decision_id: str | None = None
     instrument_id: InstrumentId
     side: OrderSide
+    intent: OrderIntent = OrderIntent.OPEN_LONG
     quantity: float = Field(gt=0)
     order_type: OrderType = OrderType.MARKET
     status: OrderStatus = OrderStatus.PENDING
@@ -198,6 +217,7 @@ class Order(BaseModel):
     applied_fill_ids: list[str] = Field(default_factory=list)
     filled_quantity: float = Field(default=0.0, ge=0)
     average_fill_price: float | None = Field(default=None, ge=0)
+    reduce_only: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     external_id: str | None = None
@@ -268,9 +288,10 @@ class Portfolio(BaseModel):
 
     Attributes:
         cash: Available free balance (quote currency).
-        positions: Mapping of instrument -> quantity held.
-        blocked_cash: Cash locked in pending buy orders.
-        blocked_positions: Quantity locked in pending sell orders.
+        positions: Mapping of instrument -> signed net quantity held.
+            Positive = long inventory, negative = short inventory.
+        blocked_cash: Cash locked for pending orders.
+        blocked_positions: Long quantity locked while closing long positions.
     """
 
     model_config = {"frozen": False}
@@ -323,11 +344,13 @@ class OrderRequest(BaseModel):
     oms_order_id: str
     instrument_id: InstrumentId
     side: OrderSide
+    intent: OrderIntent = OrderIntent.OPEN_LONG
     quantity: PositiveFloat
     order_type: OrderType
     limit_price: float | None = None
     stop_price: float | None = None
     time_in_force: TimeInForce = TimeInForce.GTC
+    reduce_only: bool = False
 
 
 class FillEvent(BaseModel):
@@ -374,6 +397,8 @@ class OrderManagementSystem:
         store: RedisStore | MemoryStore,
         initial_cash: float = DEFAULT_INITIAL_CASH,
         risk_fraction: float = DEFAULT_RISK_FRACTION,
+        account_mode: AccountMode | str = AccountMode.SPOT,
+        short_leverage: float = 1.0,
     ) -> None:
         """Initialize OMS with store and configuration.
 
@@ -381,6 +406,8 @@ class OrderManagementSystem:
             store: Persistence backend (Redis or Memory).
             initial_cash: Starting cash balance for new portfolios.
             risk_fraction: Maximum fraction of cash to risk per trade.
+            account_mode: Trading account mode (spot/margin/perp).
+            short_leverage: Effective leverage used for short collateral checks.
 
         Raises:
             ValueError: If risk_fraction not in (0, 1].
@@ -388,9 +415,17 @@ class OrderManagementSystem:
         if not 0 < risk_fraction <= 1:
             msg = f"risk_fraction must be in (0, 1], got {risk_fraction}"
             raise ValueError(msg)
+        if short_leverage <= 0:
+            msg = f"short_leverage must be > 0, got {short_leverage}"
+            raise ValueError(msg)
 
         self.store = store
         self.risk_fraction = risk_fraction
+        self.account_mode = (
+            account_mode if isinstance(account_mode, AccountMode)
+            else AccountMode(str(account_mode).lower())
+        )
+        self.short_leverage = short_leverage
         self.portfolio = self._load_or_init_portfolio(initial_cash)
 
     def _load_or_init_portfolio(self, initial_cash: float) -> Portfolio:
@@ -447,50 +482,60 @@ class OrderManagementSystem:
         trade_value = self.portfolio.cash * self.risk_fraction * quantity_modifier
         return trade_value / current_price if current_price > 0 else 0.0
 
+    def _short_collateral_required(self, quantity: float, current_price: float) -> float:
+        """Estimate collateral required to open a short position."""
+        notional = quantity * current_price
+        return notional / self.short_leverage if self.short_leverage > 0 else notional
+
+    def _has_pending_close_order(self, instrument_id: InstrumentId) -> bool:
+        """Check whether there is already a pending close order for instrument."""
+        for order in self.get_open_orders():
+            if order.instrument_id != instrument_id:
+                continue
+            if order.intent in {OrderIntent.CLOSE_LONG, OrderIntent.CLOSE_SHORT}:
+                return True
+        return False
+
+    def _build_order_request(self, order: Order) -> OrderRequest:
+        """Convert internal order to immutable request payload."""
+        return OrderRequest(
+            oms_order_id=order.id,
+            instrument_id=order.instrument_id,
+            side=order.side,
+            intent=order.intent,
+            quantity=order.quantity,
+            order_type=order.order_type,
+            limit_price=order.limit_price,
+            stop_price=order.stop_price,
+            time_in_force=order.time_in_force,
+            reduce_only=order.reduce_only,
+        )
+
     def process_decision(
         self,
         decision: TradingDecision,
         current_price: float,
     ) -> OrderRequest | None:
-        """Convert trading decision into executable order request.
-
-        Performs pre-trade validation and pessimistically reserves
-        required funds/positions before creating the order.
-
-        Args:
-            decision: Trading decision from supervisor.
-            current_price: Current market price for sizing.
-
-        Returns:
-            OrderRequest if order created, None if rejected or neutral.
-
-        Raises:
-            InsufficientFundsError: If not enough cash for buy.
-            InsufficientPositionError: If not enough position for sell.
-        """
+        """Convert trading decision into executable order request."""
         if decision.action == SignalType.NEUTRAL:
             return None
 
         if decision.action == SignalType.EXIT:
             return self._process_exit(decision, current_price)
 
-        # Determine order side
-        side = OrderSide.BUY if decision.action == SignalType.LONG else OrderSide.SELL
-
-        # Calculate quantity
-        quantity = self.calculate_order_quantity(
-            current_price,
-            decision.quantity_modifier,
-        )
+        quantity = self.calculate_order_quantity(current_price, decision.quantity_modifier)
         if quantity < MIN_QUANTITY:
             log.warning("Order rejected: quantity below minimum", quantity=quantity)
             return None
 
-        # Pre-trade validation and reservation
         reserved_cash: float | None = None
         reserved_quantity: float | None = None
+        reduce_only = False
 
-        if side == OrderSide.BUY:
+        if decision.action == SignalType.LONG:
+            side = OrderSide.BUY
+            intent = OrderIntent.OPEN_LONG
+
             cost = quantity * current_price
             if self.portfolio.cash < cost:
                 log.warning(
@@ -500,38 +545,42 @@ class OrderManagementSystem:
                 )
                 return None
 
-            # Pessimistic reservation
             self.portfolio.cash -= cost
             self.portfolio.blocked_cash += cost
             reserved_cash = cost
 
-        elif side == OrderSide.SELL:
-            available = self.portfolio.get_available_position(decision.instrument_id)
-            if available < quantity:
+        elif decision.action == SignalType.SHORT:
+            if self.account_mode == AccountMode.SPOT:
                 log.warning(
-                    "Order rejected: insufficient position",
+                    "Order rejected: short opening not allowed in spot mode",
                     instrument=decision.instrument_id,
-                    required=quantity,
-                    available=available,
                 )
                 return None
 
-            # Pessimistic reservation
-            current_pos = self.portfolio.positions.get(decision.instrument_id, 0.0)
-            self.portfolio.positions[decision.instrument_id] = current_pos - quantity
-            current_blocked = self.portfolio.blocked_positions.get(
-                decision.instrument_id, 0.0
-            )
-            self.portfolio.blocked_positions[decision.instrument_id] = (
-                current_blocked + quantity
-            )
-            reserved_quantity = quantity
+            side = OrderSide.SELL
+            intent = OrderIntent.OPEN_SHORT
 
-        # Create order
+            collateral = self._short_collateral_required(quantity, current_price)
+            if self.portfolio.cash < collateral:
+                log.warning(
+                    "Order rejected: insufficient collateral for short",
+                    required=collateral,
+                    available=self.portfolio.cash,
+                )
+                return None
+
+            self.portfolio.cash -= collateral
+            self.portfolio.blocked_cash += collateral
+            reserved_cash = collateral
+
+        else:
+            return None
+
         order = Order(
             decision_id=str(decision.decision_id),
             instrument_id=decision.instrument_id,
             side=side,
+            intent=intent,
             quantity=quantity,
             order_type=OrderType.MARKET,
             status=OrderStatus.SUBMITTED,
@@ -539,57 +588,84 @@ class OrderManagementSystem:
             reserved_quantity=reserved_quantity,
             reserved_cash_remaining=reserved_cash,
             reserved_quantity_remaining=reserved_quantity,
+            reduce_only=reduce_only,
         )
 
-        # Persist atomically
         self._persist_state(order)
 
         log.info(
             "Order created",
             order_id=order.id,
             side=side.value,
+            intent=intent.value,
             quantity=quantity,
             instrument=decision.instrument_id,
         )
 
-        return OrderRequest(
-            oms_order_id=order.id,
-            instrument_id=order.instrument_id,
-            side=order.side,
-            quantity=order.quantity,
-            order_type=order.order_type,
-            time_in_force=order.time_in_force,
-        )
+        return self._build_order_request(order)
 
     def _process_exit(
         self,
         decision: TradingDecision,
         current_price: float,
     ) -> OrderRequest | None:
-        """Process EXIT signal by closing entire position."""
-        position = self.portfolio.get_available_position(decision.instrument_id)
-        if position < MIN_QUANTITY:
+        """Process EXIT signal by closing entire net position."""
+        if self._has_pending_close_order(decision.instrument_id):
+            log.info("Exit skipped: close order already pending", instrument=decision.instrument_id)
+            return None
+
+        position = self.portfolio.get_position(decision.instrument_id)
+        if abs(position) < MIN_QUANTITY:
             log.info("No position to exit", instrument=decision.instrument_id)
             return None
 
-        # Create sell order for entire position
-        self.portfolio.positions[decision.instrument_id] = 0.0
-        current_blocked = self.portfolio.blocked_positions.get(
-            decision.instrument_id, 0.0
-        )
-        self.portfolio.blocked_positions[decision.instrument_id] = (
-            current_blocked + position
-        )
+        reserved_cash: float | None = None
+        reserved_quantity: float | None = None
+
+        if position > 0:
+            # Close long: reserve inventory and sell with reduce_only.
+            quantity = self.portfolio.get_available_position(decision.instrument_id)
+            if quantity < MIN_QUANTITY:
+                log.info("No available long inventory to exit", instrument=decision.instrument_id)
+                return None
+
+            self.portfolio.positions[decision.instrument_id] = max(0.0, position - quantity)
+            current_blocked = self.portfolio.blocked_positions.get(decision.instrument_id, 0.0)
+            self.portfolio.blocked_positions[decision.instrument_id] = current_blocked + quantity
+            side = OrderSide.SELL
+            intent = OrderIntent.CLOSE_LONG
+            reserved_quantity = quantity
+        else:
+            # Close short: reserve buyback cash and buy with reduce_only.
+            quantity = abs(position)
+            buyback_estimate = quantity * current_price
+            if self.portfolio.cash < buyback_estimate:
+                log.warning(
+                    "Exit rejected: insufficient cash to buy back short",
+                    required=buyback_estimate,
+                    available=self.portfolio.cash,
+                )
+                return None
+
+            self.portfolio.cash -= buyback_estimate
+            self.portfolio.blocked_cash += buyback_estimate
+            side = OrderSide.BUY
+            intent = OrderIntent.CLOSE_SHORT
+            reserved_cash = buyback_estimate
 
         order = Order(
             decision_id=str(decision.decision_id),
             instrument_id=decision.instrument_id,
-            side=OrderSide.SELL,
-            quantity=position,
+            side=side,
+            intent=intent,
+            quantity=quantity,
             order_type=OrderType.MARKET,
             status=OrderStatus.SUBMITTED,
-            reserved_quantity=position,
-            reserved_quantity_remaining=position,
+            reserved_cash=reserved_cash,
+            reserved_quantity=reserved_quantity,
+            reserved_cash_remaining=reserved_cash,
+            reserved_quantity_remaining=reserved_quantity,
+            reduce_only=True,
         )
 
         self._persist_state(order)
@@ -597,17 +673,13 @@ class OrderManagementSystem:
         log.info(
             "Exit order created",
             order_id=order.id,
-            quantity=position,
+            side=side.value,
+            intent=intent.value,
+            quantity=quantity,
             instrument=decision.instrument_id,
         )
 
-        return OrderRequest(
-            oms_order_id=order.id,
-            instrument_id=order.instrument_id,
-            side=order.side,
-            quantity=order.quantity,
-            order_type=order.order_type,
-        )
+        return self._build_order_request(order)
 
     def confirm_execution(
         self,
@@ -698,8 +770,8 @@ class OrderManagementSystem:
         else:
             order.status = OrderStatus.PARTIALLY_FILLED
 
-        # Settle based on side
-        if order.side == OrderSide.BUY:
+        # Settle based on intent
+        if order.intent in {OrderIntent.OPEN_LONG, OrderIntent.CLOSE_SHORT}:
             self._settle_buy(order, fill_price, fill_qty, fee)
         else:
             self._settle_sell(order, fill_price, fill_qty, fee)
@@ -767,20 +839,51 @@ class OrderManagementSystem:
         fee: float,
     ) -> None:
         """Settle sell order execution."""
+        proceeds = (fill_qty * fill_price) - fee
+
+        if order.intent == OrderIntent.OPEN_SHORT:
+            reserved_total = order.reserved_cash or 0.0
+            reserved_remaining = order.reserved_cash_remaining
+            if reserved_remaining is None:
+                reserved_remaining = reserved_total
+
+            reserved_per_unit = (
+                reserved_total / order.quantity
+                if order.quantity > 0 and reserved_total > 0
+                else 0.0
+            )
+            reserved_to_release = min(reserved_remaining, reserved_per_unit * fill_qty)
+
+            self.portfolio.blocked_cash = max(
+                0.0, self.portfolio.blocked_cash - reserved_to_release
+            )
+            self.portfolio.cash += reserved_to_release
+            order.reserved_cash_remaining = max(0.0, reserved_remaining - reserved_to_release)
+
+            if order.status == OrderStatus.FILLED and (order.reserved_cash_remaining or 0.0) > 0.0:
+                residual = order.reserved_cash_remaining or 0.0
+                self.portfolio.blocked_cash = max(0.0, self.portfolio.blocked_cash - residual)
+                self.portfolio.cash += residual
+                order.reserved_cash_remaining = 0.0
+
+            current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
+            self.portfolio.positions[order.instrument_id] = current_pos - fill_qty
+            self.portfolio.cash += proceeds
+            return
+
+        # CLOSE_LONG path: release blocked inventory and add sale proceeds.
         reserved_remaining = order.reserved_quantity_remaining
         if reserved_remaining is None:
             reserved_remaining = order.reserved_quantity or order.quantity
 
         released_quantity = min(reserved_remaining, fill_qty)
 
-        # Release only the blocked quantity associated with this fill.
         blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
         self.portfolio.blocked_positions[order.instrument_id] = max(
             0.0, blocked - released_quantity
         )
         order.reserved_quantity_remaining = max(0.0, reserved_remaining - released_quantity)
 
-        # On final fill, clear tiny residual blocked amounts (rounding).
         if (
             order.status == OrderStatus.FILLED
             and (order.reserved_quantity_remaining or 0.0) > 0.0
@@ -790,8 +893,6 @@ class OrderManagementSystem:
             self.portfolio.blocked_positions[order.instrument_id] = max(0.0, blocked_now - residual)
             order.reserved_quantity_remaining = 0.0
 
-        # Add proceeds to cash
-        proceeds = (fill_qty * fill_price) - fee
         self.portfolio.cash += proceeds
 
     def _calculate_average_price(
@@ -810,16 +911,7 @@ class OrderManagementSystem:
         return total_value / total_qty if total_qty > 0 else new_price
 
     def revert_allocation(self, oms_order_id: str) -> None:
-        """Revert pessimistic reservations on order failure.
-
-        Called when EMS fails to submit order or order is rejected.
-
-        Args:
-            oms_order_id: OMS order ID.
-
-        Raises:
-            OrderNotFoundError: If order not found.
-        """
+        """Revert pessimistic reservations on order failure."""
         order = self.get_order(oms_order_id)
         if not order:
             log.error("Cannot revert unknown order", order_id=oms_order_id)
@@ -833,23 +925,19 @@ class OrderManagementSystem:
             )
             return
 
-        if order.side == OrderSide.BUY:
+        if order.intent in {OrderIntent.OPEN_LONG, OrderIntent.OPEN_SHORT, OrderIntent.CLOSE_SHORT}:
             reserved = order.reserved_cash_remaining
             if reserved is None:
                 reserved = order.reserved_cash or 0.0
             self.portfolio.cash += reserved
-            self.portfolio.blocked_cash = max(
-                0.0, self.portfolio.blocked_cash - reserved
-            )
+            self.portfolio.blocked_cash = max(0.0, self.portfolio.blocked_cash - reserved)
             order.reserved_cash_remaining = 0.0
         else:
             reserved = order.reserved_quantity_remaining
             if reserved is None:
                 reserved = order.reserved_quantity or order.quantity
             blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
-            self.portfolio.blocked_positions[order.instrument_id] = max(
-                0.0, blocked - reserved
-            )
+            self.portfolio.blocked_positions[order.instrument_id] = max(0.0, blocked - reserved)
             current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
             self.portfolio.positions[order.instrument_id] = current_pos + reserved
             order.reserved_quantity_remaining = 0.0
@@ -863,17 +951,11 @@ class OrderManagementSystem:
             "Order allocation reverted",
             order_id=oms_order_id,
             side=order.side.value,
+            intent=order.intent.value,
         )
 
     def cancel_order(self, oms_order_id: str) -> bool:
-        """Cancel an order and revert its reservations.
-
-        Args:
-            oms_order_id: OMS order ID.
-
-        Returns:
-            True if cancelled, False if already terminal.
-        """
+        """Cancel an order and revert its reservations."""
         order = self.get_order(oms_order_id)
         if not order:
             raise OrderNotFoundError(oms_order_id)
@@ -881,24 +963,19 @@ class OrderManagementSystem:
         if order.is_terminal:
             return False
 
-        # Revert allocations same as failure
-        if order.side == OrderSide.BUY:
+        if order.intent in {OrderIntent.OPEN_LONG, OrderIntent.OPEN_SHORT, OrderIntent.CLOSE_SHORT}:
             reserved = order.reserved_cash_remaining
             if reserved is None:
                 reserved = order.reserved_cash or 0.0
             self.portfolio.cash += reserved
-            self.portfolio.blocked_cash = max(
-                0.0, self.portfolio.blocked_cash - reserved
-            )
+            self.portfolio.blocked_cash = max(0.0, self.portfolio.blocked_cash - reserved)
             order.reserved_cash_remaining = 0.0
         else:
             reserved = order.reserved_quantity_remaining
             if reserved is None:
                 reserved = order.reserved_quantity or order.quantity
             blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
-            self.portfolio.blocked_positions[order.instrument_id] = max(
-                0.0, blocked - reserved
-            )
+            self.portfolio.blocked_positions[order.instrument_id] = max(0.0, blocked - reserved)
             current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
             self.portfolio.positions[order.instrument_id] = current_pos + reserved
             order.reserved_quantity_remaining = 0.0
@@ -908,7 +985,7 @@ class OrderManagementSystem:
 
         self._persist_state(order)
 
-        log.info("Order cancelled", order_id=oms_order_id)
+        log.info("Order cancelled", order_id=oms_order_id, intent=order.intent.value)
         return True
 
     def _iter_order_keys(self) -> list[str]:
@@ -958,7 +1035,7 @@ class OrderManagementSystem:
         expected_blocked_positions: dict[InstrumentId, float] = {}
 
         for order in open_orders:
-            if order.side == OrderSide.BUY:
+            if order.intent in {OrderIntent.OPEN_LONG, OrderIntent.OPEN_SHORT, OrderIntent.CLOSE_SHORT}:
                 remaining_cash = order.reserved_cash_remaining
                 if remaining_cash is None:
                     remaining_cash = order.reserved_cash or 0.0

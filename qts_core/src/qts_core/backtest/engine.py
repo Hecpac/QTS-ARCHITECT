@@ -396,7 +396,7 @@ class EventEngine:
                 commission,
                 slippage,
             )
-        elif decision.action in {SignalType.SHORT, SignalType.EXIT}:
+        elif decision.action == SignalType.SHORT:
             self._execute_sell(
                 decision,
                 market_data,
@@ -405,6 +405,26 @@ class EventEngine:
                 commission,
                 slippage,
             )
+        elif decision.action == SignalType.EXIT:
+            current_position = self.state.get_position(decision.instrument_id)
+            if current_position > DUST_EPS:
+                self._execute_sell(
+                    decision,
+                    market_data,
+                    current_position,
+                    fill_price,
+                    commission,
+                    slippage,
+                )
+            elif current_position < -DUST_EPS:
+                self._execute_buy(
+                    decision,
+                    market_data,
+                    abs(current_position),
+                    fill_price,
+                    commission,
+                    slippage,
+                )
 
     def _execute_buy(
         self,
@@ -452,12 +472,6 @@ class EventEngine:
     ) -> None:
         """Execute sell order."""
         current_position = self.state.get_position(decision.instrument_id)
-
-        # For EXIT, sell entire position
-        if decision.action == SignalType.EXIT:
-            if current_position <= 0:
-                return
-            quantity = current_position
 
         # Check shorting rules
         if not self.config.allow_shorting and current_position < quantity:

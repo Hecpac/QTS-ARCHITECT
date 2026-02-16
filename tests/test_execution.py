@@ -17,6 +17,8 @@ import pytest
 
 from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.execution import (
+    AccountMode,
+    CCXTGateway,
     CircuitBreaker,
     CircuitOpenError,
     CircuitState,
@@ -26,6 +28,7 @@ from qts_core.execution import (
     MemoryStore,
     MockGateway,
     Order,
+    OrderIntent,
     OrderManagementSystem,
     OrderNotFoundError,
     OrderRequest,
@@ -330,12 +333,16 @@ class TestOrderManagementSystem:
         request2 = oms.process_decision(decision, current_price=1000.0)
         assert request2 is None  # Second order fails
 
-    def test_process_sell_decision(self) -> None:
-        """Test sell decision with existing position."""
+    def test_process_short_decision_margin_mode(self) -> None:
+        """SHORT should open a short in margin mode without inventory requirement."""
         store = MemoryStore()
-        oms = OrderManagementSystem(store, initial_cash=0.0, risk_fraction=0.1)
-        oms.portfolio.positions["BTC/USDT"] = 1.0
-        oms.portfolio.cash = 100_000.0  # Need cash to calculate quantity
+        oms = OrderManagementSystem(
+            store,
+            initial_cash=100_000.0,
+            risk_fraction=0.1,
+            account_mode=AccountMode.MARGIN,
+            short_leverage=1.0,
+        )
 
         decision = TradingDecision(
             decision_id=uuid.uuid4(),
@@ -343,13 +350,38 @@ class TestOrderManagementSystem:
             action=SignalType.SHORT,
             confidence=0.8,
             quantity_modifier=1.0,
-            rationale="Test sell signal",
+            rationale="Test short open",
         )
 
         request = oms.process_decision(decision, current_price=50_000.0)
 
         assert request is not None
         assert request.side == OrderSide.SELL
+        assert request.intent == OrderIntent.OPEN_SHORT
+        assert oms.portfolio.blocked_cash > 0.0
+
+    def test_process_short_decision_rejected_in_spot_mode(self) -> None:
+        """SHORT should be rejected in spot mode."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(
+            store,
+            initial_cash=100_000.0,
+            risk_fraction=0.1,
+            account_mode=AccountMode.SPOT,
+        )
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.SHORT,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test short rejected in spot",
+        )
+
+        request = oms.process_decision(decision, current_price=50_000.0)
+
+        assert request is None
 
     def test_confirm_buy_execution(self) -> None:
         """Test confirming buy execution settles trade."""
@@ -381,6 +413,70 @@ class TestOrderManagementSystem:
         assert oms.portfolio.positions["BTC/USDT"] == 0.2
         # Cash = 90k (after reserve) + (10k reserve - 10k actual - 10 fee)
         assert oms.portfolio.cash == pytest.approx(89_990.0)
+
+    def test_confirm_open_short_execution_updates_negative_position(self) -> None:
+        """Opening short should produce negative position and credit proceeds."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(
+            store,
+            initial_cash=100_000.0,
+            risk_fraction=0.1,
+            account_mode=AccountMode.MARGIN,
+        )
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.SHORT,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test short execution",
+        )
+
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+        assert request.intent == OrderIntent.OPEN_SHORT
+
+        cash_after_reserve = oms.portfolio.cash
+
+        oms.confirm_execution(
+            request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=request.quantity,
+            fee=0.0,
+            exchange_trade_id="short-open-1",
+        )
+
+        # Reservation released + sale proceeds added.
+        assert oms.portfolio.cash > cash_after_reserve
+        assert oms.portfolio.blocked_cash == pytest.approx(0.0)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(-request.quantity)
+
+    def test_exit_from_short_creates_reduce_only_buy(self) -> None:
+        """EXIT with negative position should create CLOSE_SHORT buy order."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(
+            store,
+            initial_cash=100_000.0,
+            risk_fraction=0.1,
+            account_mode=AccountMode.MARGIN,
+        )
+        oms.portfolio.positions["BTC/USDT"] = -0.2
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.EXIT,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test exit short",
+        )
+
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+        assert request.side == OrderSide.BUY
+        assert request.intent == OrderIntent.CLOSE_SHORT
+        assert request.reduce_only is True
 
     def test_confirm_buy_partial_execution_is_incremental(self) -> None:
         """Partial buy fills should release reservations incrementally."""
@@ -793,6 +889,50 @@ class TestMockGateway:
         assert fill is None
 
         await gateway.stop()
+
+
+class TestCCXTGatewayPayload:
+    """Tests for CCXT order payload assembly."""
+
+    def test_reduce_only_param_enabled_for_margin(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.MARGIN,
+        )
+
+        order = OrderRequest(
+            oms_order_id="test-1",
+            instrument_id="BTC/USDT",
+            side=OrderSide.BUY,
+            intent=OrderIntent.CLOSE_SHORT,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+            reduce_only=True,
+        )
+
+        *_head, params = gateway._build_create_order_payload(order)
+        assert params.get("reduceOnly") is True
+
+    def test_reduce_only_param_not_set_for_spot(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.SPOT,
+        )
+
+        order = OrderRequest(
+            oms_order_id="test-2",
+            instrument_id="BTC/USDT",
+            side=OrderSide.SELL,
+            intent=OrderIntent.CLOSE_LONG,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+            reduce_only=True,
+        )
+
+        *_head, params = gateway._build_create_order_payload(order)
+        assert "reduceOnly" not in params
 
 
 # ==============================================================================

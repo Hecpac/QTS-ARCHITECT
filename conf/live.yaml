@@ -9,6 +9,8 @@ symbol: "BTC/USDT"
 oms:
   initial_cash: 100000.0
   risk_fraction: 0.10
+  account_mode: "margin"
+  short_leverage: 1.0
 
 agents:
   strategies:

@@ -4,3 +4,4 @@ sandbox: false
 apiKey: ""
 secret: ""
 paper_trading: true
+account_mode: "margin"

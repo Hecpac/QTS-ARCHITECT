@@ -153,6 +153,8 @@ class LiveTrader:
             self.store,
             initial_cash=float(cfg.oms.get("initial_cash", 100_000.0)),
             risk_fraction=float(cfg.oms.get("risk_fraction", 0.10)),
+            account_mode=str(cfg.oms.get("account_mode", "spot")),
+            short_leverage=float(cfg.oms.get("short_leverage", 1.0)),
         )
         self.ems: ExecutionGateway = instantiate(cfg.gateway)
 

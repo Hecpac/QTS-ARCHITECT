@@ -9,13 +9,20 @@ Tests cover:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import numpy as np
 import polars as pl
 import pytest
 
+from qts_core.agents.protocol import SignalType, TradingDecision
+from qts_core.common.types import InstrumentId, MarketData
+
 from qts_core.backtest import (
+    BacktestConfig,
     BarrierLabel,
     DrawdownInfo,
+    EventEngine,
     MetricsCalculator,
     PerformanceMetrics,
     PerformanceStats,
@@ -410,3 +417,37 @@ class TestFilterValidLabels:
 
         # Only rows where both label and barrier_ret are not null
         assert len(result) == 3
+
+
+class TestEventEngineExitSemantics:
+    """Tests for EXIT behavior with signed positions."""
+
+    def test_exit_closes_short_with_buy(self) -> None:
+        """EXIT should buy to cover when current position is negative."""
+        engine = EventEngine(supervisor=object(), config=BacktestConfig())
+        instrument = InstrumentId("BTC/USDT")
+
+        engine.state.positions[instrument] = -0.5
+        initial_cash = engine.state.cash
+
+        decision = TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.EXIT,
+            quantity_modifier=1.0,
+            rationale="close short",
+        )
+        market_data = MarketData(
+            instrument_id=instrument,
+            timestamp=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10.0,
+        )
+
+        engine._execute(decision, market_data)
+
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        # Buy-to-cover should consume cash.
+        assert engine.state.cash < initial_cash
