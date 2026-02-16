@@ -49,6 +49,10 @@ class LiveTrader:
         self.symbol: str = cfg.get("symbol", "BTC/USDT")
         self.tick_interval: float = float(cfg.loop.get("tick_interval", 1.0))
         self.heartbeat_key: str = cfg.loop.get("heartbeat_key", "SYSTEM:HEARTBEAT")
+        self.execution_timeout: float = max(
+            0.1,
+            float(cfg.loop.get("execution_timeout", max(5.0, self.tick_interval * 2))),
+        )
         self._last_market_data: MarketData | None = None
         self._last_ohlcv_history: list[OHLCVTuple] | None = None
         self._last_ohlcv_payload: list[dict[str, Any]] | None = None
@@ -318,7 +322,17 @@ class LiveTrader:
                     continue
 
                 try:
-                    fill_report = await self.ems.submit_order(order_request)
+                    fill_report = await asyncio.wait_for(
+                        self.ems.submit_order(order_request),
+                        timeout=self.execution_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    log.error(
+                        "Order submission timed out; preserving reservation for reconciliation",
+                        order_id=order_request.oms_order_id,
+                        timeout_seconds=self.execution_timeout,
+                    )
+                    continue
                 except Exception as exc:
                     log.error(
                         "Order Submission Failed",
@@ -329,13 +343,21 @@ class LiveTrader:
                     continue
 
                 if fill_report:
-                    self.oms.confirm_execution(
-                        oms_order_id=fill_report.oms_order_id,
-                        fill_price=fill_report.price,
-                        fill_qty=fill_report.quantity,
-                        fee=fill_report.fee,
-                        exchange_trade_id=fill_report.exchange_order_id,
-                    )
+                    try:
+                        self.oms.confirm_execution(
+                            oms_order_id=fill_report.oms_order_id,
+                            fill_price=fill_report.price,
+                            fill_qty=fill_report.quantity,
+                            fee=fill_report.fee,
+                            exchange_trade_id=fill_report.exchange_order_id,
+                        )
+                    except Exception as exc:
+                        log.error(
+                            "Order confirmation failed; preserving reservation for reconciliation",
+                            error=str(exc),
+                            order_id=order_request.oms_order_id,
+                        )
+                        continue
                     self._record_order_view(order_request, fill_report)
                 else:
                     log.error(

@@ -652,6 +652,40 @@ class TestCircuitBreaker:
         assert cb.state == CircuitState.OPEN
         assert cb.time_until_reset() > 0.0
 
+    def test_half_open_allows_single_inflight_probe(self) -> None:
+        """HALF_OPEN should allow only one in-flight probe request."""
+        cb = CircuitBreaker(failure_threshold=1, reset_timeout=0.0)
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+
+        # First request transitions to HALF_OPEN and is allowed.
+        assert cb.can_execute() is True
+        assert cb.state == CircuitState.HALF_OPEN
+
+        # Second concurrent probe must be blocked.
+        assert cb.can_execute() is False
+
+        # Probe completion unlocks next probe.
+        cb.record_success()
+        assert cb.can_execute() is True
+        cb.record_success()
+        assert cb.state == CircuitState.CLOSED
+
+    def test_half_open_failure_reopens_circuit(self) -> None:
+        """A failed HALF_OPEN probe should reopen and block new requests."""
+        cb = CircuitBreaker(failure_threshold=1, reset_timeout=60.0)
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+
+        # Force half-open transition for probe.
+        cb.last_failure_time -= cb.reset_timeout
+        assert cb.can_execute() is True
+        assert cb.state == CircuitState.HALF_OPEN
+
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+        assert cb.can_execute() is False
+
 
 # ==============================================================================
 # Rate Limiter Tests

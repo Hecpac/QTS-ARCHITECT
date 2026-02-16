@@ -171,12 +171,14 @@ class CircuitBreaker:
     failure_count: int = field(default=0)
     last_failure_time: float = field(default=0.0)
     success_count: int = field(default=0)
+    half_open_in_flight: bool = field(default=False)
 
     def record_success(self) -> None:
         """Record successful request."""
         if self.state == CircuitState.HALF_OPEN:
+            self.half_open_in_flight = False
             self.success_count += 1
-            # Require 2 successes to fully close
+            # Require 2 sequential probe successes to fully close.
             if self.success_count >= 2:
                 self._close()
         else:
@@ -188,6 +190,7 @@ class CircuitBreaker:
         self.last_failure_time = time.monotonic()
 
         if self.state == CircuitState.HALF_OPEN:
+            self.half_open_in_flight = False
             self._open()
         elif self.failure_count >= self.failure_threshold:
             self._open()
@@ -200,11 +203,17 @@ class CircuitBreaker:
         if self.state == CircuitState.OPEN:
             if self._should_attempt_reset():
                 self._half_open()
-                return True
-            return False
+            else:
+                return False
 
-        # HALF_OPEN: allow one request
-        return True
+        # HALF_OPEN: allow only one in-flight probe request.
+        if self.state == CircuitState.HALF_OPEN:
+            if self.half_open_in_flight:
+                return False
+            self.half_open_in_flight = True
+            return True
+
+        return False
 
     def time_until_reset(self) -> float:
         """Seconds until circuit might reset."""
@@ -221,6 +230,7 @@ class CircuitBreaker:
         """Open the circuit."""
         self.state = CircuitState.OPEN
         self.success_count = 0
+        self.half_open_in_flight = False
         log.warning(
             "Circuit breaker OPEN",
             failures=self.failure_count,
@@ -231,6 +241,7 @@ class CircuitBreaker:
         """Transition to half-open for recovery test."""
         self.state = CircuitState.HALF_OPEN
         self.success_count = 0
+        self.half_open_in_flight = False
         log.info("Circuit breaker HALF_OPEN, testing recovery")
 
     def _close(self) -> None:
@@ -238,6 +249,7 @@ class CircuitBreaker:
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.success_count = 0
+        self.half_open_in_flight = False
         log.info("Circuit breaker CLOSED, recovered")
 
 
