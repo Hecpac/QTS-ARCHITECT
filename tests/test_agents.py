@@ -306,6 +306,35 @@ class TestRiskAgents:
 
         assert verdict.status == RiskStatus.APPROVED
 
+    @pytest.mark.asyncio
+    async def test_exit_signal_bypasses_exposure_rejection(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """EXIT should be approved even when exposure is above max limit."""
+        agent = StrictRiskAgent(
+            name="strict_risk",
+            min_signal_confidence=0.99,
+            max_position_size=0.10,
+        )
+
+        signal = AgentSignal(
+            source_agent="test",
+            signal_type=SignalType.EXIT,
+            confidence=0.1,
+        )
+
+        request = ReviewRequest(
+            proposed_signal=signal,
+            instrument_id=instrument_id,
+            current_price=100.0,
+            portfolio_exposure=0.50,
+        )
+
+        verdict = await agent.evaluate(request)
+
+        assert verdict.status == RiskStatus.APPROVED
+
 
 # ==============================================================================
 # Supervisor Tests
@@ -414,6 +443,53 @@ class TestSupervisor:
 
         # Signal generated but rejected by risk
         assert decision is None
+
+    @pytest.mark.asyncio
+    async def test_exit_signal_is_prioritized(
+        self,
+        instrument_id: InstrumentId,
+        timestamp: datetime,
+    ) -> None:
+        """Supervisor should prioritize EXIT signals over directional consensus."""
+
+        class ExitAgent:
+            name = "exit_agent"
+
+            async def analyze(self, **_kwargs):
+                return AgentSignal(
+                    source_agent=self.name,
+                    signal_type=SignalType.EXIT,
+                    confidence=0.2,
+                    priority=AgentPriority.HIGH,
+                    timestamp=timestamp,
+                )
+
+        long_agent = TechnicalAgent(name="long_agent", min_confidence=0.0)
+        risk = StrictRiskAgent(name="risk", min_signal_confidence=0.99)
+
+        supervisor = Supervisor(
+            strategy_agents=[long_agent, ExitAgent()],
+            risk_agent=risk,
+            consensus_strategy=ConsensusStrategy.HIGHEST_CONFIDENCE,
+            min_confidence=0.95,
+        )
+
+        # Strong bullish candle would normally emit LONG if EXIT were not prioritized.
+        history = [(timestamp, 100.0, 110.0, 99.0, 109.0, 1000.0)]
+        market_data = MarketData(
+            instrument_id=instrument_id,
+            timestamp=timestamp,
+            open=100.0,
+            high=110.0,
+            low=99.0,
+            close=109.0,
+            volume=1000.0,
+        )
+
+        decision = await supervisor.run(market_data, ohlcv_history=history)
+
+        assert decision is not None
+        assert decision.action == SignalType.EXIT
 
     def test_supervisor_requires_at_least_one_agent(self) -> None:
         """Supervisor should require at least one strategy agent."""

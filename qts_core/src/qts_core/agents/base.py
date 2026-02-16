@@ -183,6 +183,14 @@ class BaseRiskAgent:
         Returns:
             RiskVerdict with approval status.
         """
+        # EXIT is always risk-reducing and must not be blocked by exposure checks.
+        if request.proposed_signal.signal_type == SignalType.EXIT:
+            return RiskVerdict(
+                status=RiskStatus.APPROVED,
+                reason="Exit signal approved (risk reduction)",
+                risk_metrics={"current_exposure": request.portfolio_exposure},
+            )
+
         # Check exposure limits
         if request.portfolio_exposure > self.max_position_size:
             return RiskVerdict(

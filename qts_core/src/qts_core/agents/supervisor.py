@@ -164,19 +164,30 @@ class Supervisor:
             )
             return None
 
-        # 2. Filter valid signals
-        valid_signals = [
-            s for s in signals
-            if s.signal_type not in (SignalType.NEUTRAL, SignalType.EXIT)
-            and s.confidence >= self.min_confidence
-        ]
+        # 2. Prioritize explicit EXIT signals for risk-off behavior.
+        exit_signals = [s for s in signals if s.signal_type == SignalType.EXIT]
+        if exit_signals:
+            consensus_signal = max(exit_signals, key=lambda s: s.confidence)
+            log.info(
+                "Exit signal prioritized",
+                source=consensus_signal.source_agent,
+                confidence=consensus_signal.confidence,
+            )
+            valid_signals = exit_signals
+        else:
+            # 3. Filter directional actionable signals
+            valid_signals = [
+                s for s in signals
+                if s.signal_type != SignalType.NEUTRAL
+                and s.confidence >= self.min_confidence
+            ]
 
-        if not valid_signals:
-            log.debug("No actionable signals", total=len(signals))
-            return None
+            if not valid_signals:
+                log.debug("No actionable signals", total=len(signals))
+                return None
 
-        # 3. Apply consensus strategy
-        consensus_signal = self._apply_consensus(valid_signals)
+            # 4. Apply consensus strategy
+            consensus_signal = self._apply_consensus(valid_signals)
         if consensus_signal is None:
             log.info("No consensus reached")
             return None
