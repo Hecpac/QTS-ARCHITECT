@@ -169,6 +169,9 @@ class Order(BaseModel):
         time_in_force: Order validity duration.
         reserved_cash: Cash blocked for buy orders.
         reserved_quantity: Quantity blocked for sell orders.
+        reserved_cash_remaining: Remaining cash reservation for this order.
+        reserved_quantity_remaining: Remaining quantity reservation for this order.
+        applied_fill_ids: Exchange fill IDs already applied (idempotency).
         filled_quantity: Quantity filled so far.
         average_fill_price: Average price of fills.
         created_at: Order creation timestamp.
@@ -190,6 +193,9 @@ class Order(BaseModel):
     time_in_force: TimeInForce = TimeInForce.GTC
     reserved_cash: float | None = Field(default=None, ge=0)
     reserved_quantity: float | None = Field(default=None, ge=0)
+    reserved_cash_remaining: float | None = Field(default=None, ge=0)
+    reserved_quantity_remaining: float | None = Field(default=None, ge=0)
+    applied_fill_ids: list[str] = Field(default_factory=list)
     filled_quantity: float = Field(default=0.0, ge=0)
     average_fill_price: float | None = Field(default=None, ge=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -531,6 +537,8 @@ class OrderManagementSystem:
             status=OrderStatus.SUBMITTED,
             reserved_cash=reserved_cash,
             reserved_quantity=reserved_quantity,
+            reserved_cash_remaining=reserved_cash,
+            reserved_quantity_remaining=reserved_quantity,
         )
 
         # Persist atomically
@@ -581,6 +589,7 @@ class OrderManagementSystem:
             order_type=OrderType.MARKET,
             status=OrderStatus.SUBMITTED,
             reserved_quantity=position,
+            reserved_quantity_remaining=position,
         )
 
         self._persist_state(order)
@@ -606,6 +615,7 @@ class OrderManagementSystem:
         fill_price: float,
         fill_qty: float,
         fee: float = 0.0,
+        exchange_trade_id: str | None = None,
     ) -> None:
         """Confirm order execution and settle the trade.
 
@@ -617,6 +627,7 @@ class OrderManagementSystem:
             fill_price: Execution price.
             fill_qty: Filled quantity.
             fee: Transaction fee (deducted from proceeds/added to cost).
+            exchange_trade_id: Optional exchange trade ID for idempotency.
 
         Raises:
             OrderNotFoundError: If order not found.
@@ -635,11 +646,48 @@ class OrderManagementSystem:
             )
             return
 
+        if fill_price <= 0 or fill_qty <= 0:
+            log.warning(
+                "Ignoring invalid fill payload",
+                order_id=oms_order_id,
+                fill_price=fill_price,
+                fill_qty=fill_qty,
+            )
+            return
+
+        if exchange_trade_id and exchange_trade_id in order.applied_fill_ids:
+            log.warning(
+                "Ignoring duplicate fill",
+                order_id=oms_order_id,
+                exchange_trade_id=exchange_trade_id,
+            )
+            return
+
+        remaining_before = order.remaining_quantity
+        if remaining_before <= MIN_QUANTITY:
+            log.warning(
+                "Ignoring fill with no remaining quantity",
+                order_id=oms_order_id,
+            )
+            return
+
+        effective_fill_qty = min(fill_qty, remaining_before)
+        if fill_qty > remaining_before + MIN_QUANTITY:
+            log.warning(
+                "Fill quantity exceeded remaining quantity; clamping",
+                order_id=oms_order_id,
+                requested=fill_qty,
+                remaining=remaining_before,
+                clamped=effective_fill_qty,
+            )
+        fill_qty = effective_fill_qty
+
         # Update order state
+        prior_filled = order.filled_quantity
         order.filled_quantity += fill_qty
         order.average_fill_price = self._calculate_average_price(
             order.average_fill_price,
-            order.filled_quantity - fill_qty,
+            prior_filled,
             fill_price,
             fill_qty,
         )
@@ -656,6 +704,9 @@ class OrderManagementSystem:
         else:
             self._settle_sell(order, fill_price, fill_qty, fee)
 
+        if exchange_trade_id:
+            order.applied_fill_ids.append(exchange_trade_id)
+
         self._persist_state(order)
 
         log.info(
@@ -664,6 +715,7 @@ class OrderManagementSystem:
             fill_price=fill_price,
             fill_qty=fill_qty,
             status=order.status.value,
+            exchange_trade_id=exchange_trade_id,
         )
 
     def _settle_buy(
@@ -674,17 +726,34 @@ class OrderManagementSystem:
         fee: float,
     ) -> None:
         """Settle buy order execution."""
-        reserved = order.reserved_cash or 0.0
+        reserved_total = order.reserved_cash or 0.0
+        reserved_remaining = order.reserved_cash_remaining
+        if reserved_remaining is None:
+            reserved_remaining = reserved_total
+
+        reserved_per_unit = (
+            reserved_total / order.quantity
+            if order.quantity > 0 and reserved_total > 0
+            else fill_price
+        )
+        reserved_to_release = min(reserved_remaining, reserved_per_unit * fill_qty)
         actual_cost = (fill_qty * fill_price) + fee
 
-        # Release blocked cash
+        # Release only the reservation associated with this fill.
         self.portfolio.blocked_cash = max(
-            0.0, self.portfolio.blocked_cash - reserved
+            0.0, self.portfolio.blocked_cash - reserved_to_release
         )
 
-        # Return unused cash (slippage/price improvement)
-        cash_delta = reserved - actual_cost
-        self.portfolio.cash += cash_delta
+        # Adjust free cash by (released reservation - actual cost).
+        self.portfolio.cash += reserved_to_release - actual_cost
+        order.reserved_cash_remaining = max(0.0, reserved_remaining - reserved_to_release)
+
+        # On final fill, release any tiny residual reservation (rounding).
+        if order.status == OrderStatus.FILLED and (order.reserved_cash_remaining or 0.0) > 0.0:
+            residual = order.reserved_cash_remaining or 0.0
+            self.portfolio.blocked_cash = max(0.0, self.portfolio.blocked_cash - residual)
+            self.portfolio.cash += residual
+            order.reserved_cash_remaining = 0.0
 
         # Add to position
         current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
@@ -698,19 +767,28 @@ class OrderManagementSystem:
         fee: float,
     ) -> None:
         """Settle sell order execution."""
-        reserved = order.reserved_quantity or order.quantity
+        reserved_remaining = order.reserved_quantity_remaining
+        if reserved_remaining is None:
+            reserved_remaining = order.reserved_quantity or order.quantity
 
-        # Release blocked position
+        released_quantity = min(reserved_remaining, fill_qty)
+
+        # Release only the blocked quantity associated with this fill.
         blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
         self.portfolio.blocked_positions[order.instrument_id] = max(
-            0.0, blocked - reserved
+            0.0, blocked - released_quantity
         )
+        order.reserved_quantity_remaining = max(0.0, reserved_remaining - released_quantity)
 
-        # Return unfilled quantity to position
-        unfilled = max(0.0, reserved - fill_qty)
-        if unfilled > MIN_QUANTITY:
-            current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
-            self.portfolio.positions[order.instrument_id] = current_pos + unfilled
+        # On final fill, clear tiny residual blocked amounts (rounding).
+        if (
+            order.status == OrderStatus.FILLED
+            and (order.reserved_quantity_remaining or 0.0) > 0.0
+        ):
+            residual = order.reserved_quantity_remaining or 0.0
+            blocked_now = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
+            self.portfolio.blocked_positions[order.instrument_id] = max(0.0, blocked_now - residual)
+            order.reserved_quantity_remaining = 0.0
 
         # Add proceeds to cash
         proceeds = (fill_qty * fill_price) - fee
@@ -756,19 +834,25 @@ class OrderManagementSystem:
             return
 
         if order.side == OrderSide.BUY:
-            reserved = order.reserved_cash or 0.0
+            reserved = order.reserved_cash_remaining
+            if reserved is None:
+                reserved = order.reserved_cash or 0.0
             self.portfolio.cash += reserved
             self.portfolio.blocked_cash = max(
                 0.0, self.portfolio.blocked_cash - reserved
             )
+            order.reserved_cash_remaining = 0.0
         else:
-            reserved = order.reserved_quantity or order.quantity
+            reserved = order.reserved_quantity_remaining
+            if reserved is None:
+                reserved = order.reserved_quantity or order.quantity
             blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
             self.portfolio.blocked_positions[order.instrument_id] = max(
                 0.0, blocked - reserved
             )
             current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
             self.portfolio.positions[order.instrument_id] = current_pos + reserved
+            order.reserved_quantity_remaining = 0.0
 
         order.status = OrderStatus.FAILED
         order.updated_at = datetime.now(timezone.utc)
@@ -799,19 +883,25 @@ class OrderManagementSystem:
 
         # Revert allocations same as failure
         if order.side == OrderSide.BUY:
-            reserved = order.reserved_cash or 0.0
+            reserved = order.reserved_cash_remaining
+            if reserved is None:
+                reserved = order.reserved_cash or 0.0
             self.portfolio.cash += reserved
             self.portfolio.blocked_cash = max(
                 0.0, self.portfolio.blocked_cash - reserved
             )
+            order.reserved_cash_remaining = 0.0
         else:
-            reserved = order.reserved_quantity or order.quantity
+            reserved = order.reserved_quantity_remaining
+            if reserved is None:
+                reserved = order.reserved_quantity or order.quantity
             blocked = self.portfolio.blocked_positions.get(order.instrument_id, 0.0)
             self.portfolio.blocked_positions[order.instrument_id] = max(
                 0.0, blocked - reserved
             )
             current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
             self.portfolio.positions[order.instrument_id] = current_pos + reserved
+            order.reserved_quantity_remaining = 0.0
 
         order.status = OrderStatus.CANCELLED
         order.updated_at = datetime.now(timezone.utc)
@@ -821,24 +911,83 @@ class OrderManagementSystem:
         log.info("Order cancelled", order_id=oms_order_id)
         return True
 
+    def _iter_order_keys(self) -> list[str]:
+        """List persisted order keys across supported stores."""
+        prefix = self.ORDERS_KEY_PREFIX
+
+        # RedisStore path
+        if hasattr(self.store, "client"):
+            client = getattr(self.store, "client")
+            try:
+                return [key for key in client.scan_iter(match=f"{prefix}*")]
+            except Exception as exc:
+                log.warning("Order key scan failed on redis store", error=str(exc))
+                return []
+
+        # MemoryStore path
+        if hasattr(self.store, "_data"):
+            data = getattr(self.store, "_data", {})
+            if isinstance(data, dict):
+                return [key for key in data if key.startswith(prefix)]
+
+        return []
+
     def get_open_orders(self) -> list[Order]:
         """Get all non-terminal orders.
 
         Note: This is an expensive operation requiring key scanning.
         Consider caching or maintaining an index for production use.
         """
-        # This is a simplified implementation
-        # In production, maintain a separate index of open order IDs
-        return []
+        open_orders: list[Order] = []
+        for key in self._iter_order_keys():
+            order = self.store.load(key, Order)
+            if order and not order.is_terminal:
+                open_orders.append(order)
+        return open_orders
 
     def reconcile(self) -> None:
-        """Reconcile portfolio state after crash recovery.
+        """Reconcile blocked reservations from persisted open orders.
 
-        TODO: Implement crash recovery logic:
-        1. Scan for orders in SUBMITTED/PARTIALLY_FILLED state
-        2. Query EMS for actual fill status
-        3. Reconcile blocked amounts with actual order state
+        This recovery step rebuilds blocked cash/position amounts using
+        open orders currently persisted in the store.
         """
         log.info("Portfolio reconciliation started")
-        # Implementation depends on EMS capabilities
-        log.info("Portfolio reconciliation complete")
+
+        open_orders = self.get_open_orders()
+        expected_blocked_cash = 0.0
+        expected_blocked_positions: dict[InstrumentId, float] = {}
+
+        for order in open_orders:
+            if order.side == OrderSide.BUY:
+                remaining_cash = order.reserved_cash_remaining
+                if remaining_cash is None:
+                    remaining_cash = order.reserved_cash or 0.0
+                expected_blocked_cash += remaining_cash
+            else:
+                remaining_qty = order.reserved_quantity_remaining
+                if remaining_qty is None:
+                    remaining_qty = order.reserved_quantity or max(
+                        0.0,
+                        order.quantity - order.filled_quantity,
+                    )
+                if remaining_qty > MIN_QUANTITY:
+                    expected_blocked_positions[order.instrument_id] = (
+                        expected_blocked_positions.get(order.instrument_id, 0.0)
+                        + remaining_qty
+                    )
+
+        self.portfolio.blocked_cash = max(0.0, expected_blocked_cash)
+        self.portfolio.blocked_positions = {
+            instrument: qty
+            for instrument, qty in expected_blocked_positions.items()
+            if qty > MIN_QUANTITY
+        }
+
+        self.store.save(self.PORTFOLIO_KEY, self.portfolio)
+
+        log.info(
+            "Portfolio reconciliation complete",
+            open_orders=len(open_orders),
+            blocked_cash=self.portfolio.blocked_cash,
+            blocked_positions=len(self.portfolio.blocked_positions),
+        )

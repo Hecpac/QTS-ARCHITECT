@@ -382,6 +382,165 @@ class TestOrderManagementSystem:
         # Cash = 90k (after reserve) + (10k reserve - 10k actual - 10 fee)
         assert oms.portfolio.cash == pytest.approx(89_990.0)
 
+    def test_confirm_buy_partial_execution_is_incremental(self) -> None:
+        """Partial buy fills should release reservations incrementally."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(store, initial_cash=100_000.0, risk_fraction=0.1)
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.LONG,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test buy partial fill",
+        )
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+
+        # 10,000 reserved, first partial consumes 5,000
+        oms.confirm_execution(
+            request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=0.1,
+            fee=0.0,
+            exchange_trade_id="fill-1",
+        )
+
+        assert oms.portfolio.blocked_cash == pytest.approx(5_000.0)
+        assert oms.portfolio.cash == pytest.approx(90_000.0)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(0.1)
+
+        order = oms.get_order(request.oms_order_id)
+        assert order is not None
+        assert order.status == OrderStatus.PARTIALLY_FILLED
+        assert order.filled_quantity == pytest.approx(0.1)
+
+        # Final partial consumes remaining reservation
+        oms.confirm_execution(
+            request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=0.1,
+            fee=0.0,
+            exchange_trade_id="fill-2",
+        )
+
+        assert oms.portfolio.blocked_cash == pytest.approx(0.0)
+        assert oms.portfolio.cash == pytest.approx(90_000.0)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(0.2)
+
+        final_order = oms.get_order(request.oms_order_id)
+        assert final_order is not None
+        assert final_order.status == OrderStatus.FILLED
+
+    def test_confirm_execution_is_idempotent_by_exchange_trade_id(self) -> None:
+        """Duplicate exchange_trade_id must not be settled twice."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(store, initial_cash=100_000.0, risk_fraction=0.1)
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.LONG,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test idempotent fill",
+        )
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+
+        oms.confirm_execution(
+            request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=0.1,
+            fee=0.0,
+            exchange_trade_id="dup-fill",
+        )
+
+        cash_after_first = oms.portfolio.cash
+        blocked_after_first = oms.portfolio.blocked_cash
+        pos_after_first = oms.portfolio.positions["BTC/USDT"]
+
+        # Duplicate fill should be ignored
+        oms.confirm_execution(
+            request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=0.1,
+            fee=0.0,
+            exchange_trade_id="dup-fill",
+        )
+
+        assert oms.portfolio.cash == pytest.approx(cash_after_first)
+        assert oms.portfolio.blocked_cash == pytest.approx(blocked_after_first)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(pos_after_first)
+
+        order = oms.get_order(request.oms_order_id)
+        assert order is not None
+        assert order.filled_quantity == pytest.approx(0.1)
+        assert order.applied_fill_ids == ["dup-fill"]
+
+    def test_revert_allocation_after_partial_fill_reverts_only_remaining(self) -> None:
+        """Revert after partial fill should only release remaining reservation."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(store, initial_cash=100_000.0, risk_fraction=0.1)
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.LONG,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test revert after partial",
+        )
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+
+        oms.confirm_execution(
+            request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=0.1,
+            fee=0.0,
+            exchange_trade_id="partial-1",
+        )
+
+        oms.revert_allocation(request.oms_order_id)
+
+        # 5k spent on the executed half; only remaining 5k reservation is restored.
+        assert oms.portfolio.cash == pytest.approx(95_000.0)
+        assert oms.portfolio.blocked_cash == pytest.approx(0.0)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(0.1)
+
+        order = oms.get_order(request.oms_order_id)
+        assert order is not None
+        assert order.status == OrderStatus.FAILED
+
+    def test_get_open_orders_and_reconcile(self) -> None:
+        """Reconcile should rebuild blocked amounts from open orders."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(store, initial_cash=100_000.0, risk_fraction=0.1)
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.LONG,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test reconcile",
+        )
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+
+        open_orders = oms.get_open_orders()
+        assert len(open_orders) == 1
+
+        # Simulate inconsistent blocked state after crash.
+        oms.portfolio.blocked_cash = 0.0
+        store.save(oms.PORTFOLIO_KEY, oms.portfolio)
+
+        oms.reconcile()
+
+        assert oms.portfolio.blocked_cash == pytest.approx(10_000.0)
+
     def test_revert_allocation(self) -> None:
         """Test reverting allocation restores portfolio state."""
         store = MemoryStore()

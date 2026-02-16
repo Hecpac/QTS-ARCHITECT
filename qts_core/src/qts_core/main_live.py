@@ -334,6 +334,7 @@ class LiveTrader:
                         fill_price=fill_report.price,
                         fill_qty=fill_report.quantity,
                         fee=fill_report.fee,
+                        exchange_trade_id=fill_report.exchange_order_id,
                     )
                     self._record_order_view(order_request, fill_report)
                 else:
