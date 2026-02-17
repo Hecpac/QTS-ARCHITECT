@@ -272,6 +272,30 @@ def test_reconcile_helper_runs_after_ambiguous_submission():
     assert refreshed.blocked_cash == pytest.approx(0.0)
 
 
+def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() -> None:
+    trader = _build_live_trader()
+
+    btc = InstrumentId("BTC/USDT")
+    eth = InstrumentId("ETH/USDT")
+
+    # BTC long is moved to blocked inventory (pending CLOSE_LONG) and must still count.
+    trader.oms.portfolio.positions[btc] = 0.0
+    trader.oms.portfolio.blocked_positions[btc] = 1.0
+    trader.oms.portfolio.positions[eth] = 2.0
+
+    trader._instrument_marks[btc] = 100.0
+    trader._instrument_marks[eth] = 50.0
+
+    total_value = trader._compute_total_value(default_mark=100.0)
+    exposure = trader._compute_portfolio_exposure_fraction(
+        default_mark=100.0,
+        total_value=total_value,
+    )
+
+    # Gross notional = 1*100 + 2*50 = 200
+    assert exposure == pytest.approx(200.0 / total_value)
+
+
 @pytest.mark.asyncio
 async def test_halt_liquidation_attempts_to_close_open_positions() -> None:
     trader = _build_live_trader()

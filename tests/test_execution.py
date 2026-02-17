@@ -891,6 +891,16 @@ class TestMockGateway:
         await gateway.stop()
 
 
+class _FakeExchangeForParse:
+    """Minimal async fake exchange for _parse_response tests."""
+
+    def __init__(self, fetched_order: dict) -> None:
+        self.fetched_order = fetched_order
+
+    async def fetch_order(self, order_id: str, symbol: str) -> dict:  # noqa: ARG002
+        return self.fetched_order
+
+
 class TestCCXTGatewayPayload:
     """Tests for CCXT order payload assembly."""
 
@@ -933,6 +943,62 @@ class TestCCXTGatewayPayload:
 
         *_head, params = gateway._build_create_order_payload(order)
         assert "reduceOnly" not in params
+
+    @pytest.mark.asyncio
+    async def test_parse_response_rejects_missing_fill_price(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.MARGIN,
+        )
+        gateway.exchange = _FakeExchangeForParse(
+            {"filled": 0.1, "average": None, "price": None}
+        )
+
+        order = OrderRequest(
+            oms_order_id="test-missing-price",
+            instrument_id="BTC/USDT",
+            side=OrderSide.BUY,
+            intent=OrderIntent.OPEN_LONG,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+        )
+
+        fill = await gateway._parse_response(
+            order,
+            {"id": "ex-1", "filled": 0.1, "price": None, "average": None},
+            "BTC/USDT",
+        )
+        assert fill is None
+
+    @pytest.mark.asyncio
+    async def test_parse_response_uses_fetch_order_price_when_present(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.MARGIN,
+        )
+        gateway.exchange = _FakeExchangeForParse(
+            {"filled": 0.1, "average": 50_000.0}
+        )
+
+        order = OrderRequest(
+            oms_order_id="test-fetch-price",
+            instrument_id="BTC/USDT",
+            side=OrderSide.BUY,
+            intent=OrderIntent.OPEN_LONG,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+        )
+
+        fill = await gateway._parse_response(
+            order,
+            {"id": "ex-2", "filled": None, "price": None, "average": None},
+            "BTC/USDT",
+        )
+        assert fill is not None
+        assert fill.price == pytest.approx(50_000.0)
+        assert fill.quantity == pytest.approx(0.1)
 
 
 # ==============================================================================

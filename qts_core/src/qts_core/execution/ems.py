@@ -656,6 +656,50 @@ class CCXTGateway:
             )
             return None
 
+        try:
+            parsed_fill_qty = float(filled)
+        except (TypeError, ValueError):
+            log.error(
+                "Exchange returned non-numeric filled quantity",
+                filled=filled,
+                order_id=order.oms_order_id,
+            )
+            return None
+
+        if parsed_fill_qty <= 0:
+            log.error(
+                "Exchange returned non-positive filled quantity",
+                filled=parsed_fill_qty,
+                order_id=order.oms_order_id,
+            )
+            return None
+
+        if fill_price is None:
+            log.error(
+                "Exchange did not return fill price",
+                order_id=order.oms_order_id,
+                response_keys=sorted(response.keys()),
+            )
+            return None
+
+        try:
+            parsed_fill_price = float(fill_price)
+        except (TypeError, ValueError):
+            log.error(
+                "Exchange returned non-numeric fill price",
+                fill_price=fill_price,
+                order_id=order.oms_order_id,
+            )
+            return None
+
+        if parsed_fill_price <= 0:
+            log.error(
+                "Exchange returned non-positive fill price",
+                fill_price=parsed_fill_price,
+                order_id=order.oms_order_id,
+            )
+            return None
+
         # Extract fee
         fee_cost = 0.0
         fee_currency = None
@@ -666,11 +710,15 @@ class CCXTGateway:
         return FillReport(
             oms_order_id=order.oms_order_id,
             exchange_order_id=response.get("id"),
-            price=fill_price or 0.0,
-            quantity=filled,
+            price=parsed_fill_price,
+            quantity=parsed_fill_qty,
             fee=fee_cost,
             fee_currency=fee_currency,
-            status=ExecutionStatus.SUCCESS if filled >= order.quantity else ExecutionStatus.PARTIAL,
+            status=(
+                ExecutionStatus.SUCCESS
+                if parsed_fill_qty >= order.quantity
+                else ExecutionStatus.PARTIAL
+            ),
             raw_response=response,
         )
 

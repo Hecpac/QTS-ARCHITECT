@@ -169,6 +169,9 @@ class LiveTrader:
         self._daily_anchor_date: date | None = None
         self._daily_anchor_value: float | None = None
 
+        # Last known marks by instrument for multi-instrument exposure accounting.
+        self._instrument_marks: dict[InstrumentId, float] = {}
+
     async def _fetch_live_data(self) -> MarketData:
         """Fetch live market data.
 
@@ -284,15 +287,57 @@ class LiveTrader:
             }
         )
 
-    def _compute_total_value(self, mark_price: float) -> float:
-        positions_value = sum(
-            qty * mark_price for qty in self.oms.portfolio.positions.values()
-        )
+    def _mark_for_instrument(
+        self,
+        instrument_id: InstrumentId,
+        default_mark: float,
+    ) -> float:
+        mark = self._instrument_marks.get(instrument_id)
+        if mark is None or mark <= 0:
+            return default_mark
+        return mark
+
+    def _effective_position_qty(self, instrument_id: InstrumentId) -> float:
+        # Include blocked long inventory so pending CLOSE_LONG doesn't hide exposure.
+        held = self.oms.portfolio.positions.get(instrument_id, 0.0)
+        blocked = self.oms.portfolio.blocked_positions.get(instrument_id, 0.0)
+        return held + blocked
+
+    def _compute_total_value(
+        self,
+        default_mark: float,
+    ) -> float:
+        positions_value = 0.0
+        instruments = set(self.oms.portfolio.positions) | set(self.oms.portfolio.blocked_positions)
+        for instrument_id in instruments:
+            qty = self._effective_position_qty(instrument_id)
+            mark = self._mark_for_instrument(instrument_id, default_mark)
+            positions_value += qty * mark
+
         return (
             self.oms.portfolio.cash
             + self.oms.portfolio.blocked_cash
             + positions_value
         )
+
+    def _compute_portfolio_exposure_fraction(
+        self,
+        default_mark: float,
+        total_value: float,
+    ) -> float:
+        if total_value <= 0:
+            return 0.0
+
+        gross_notional = 0.0
+        instruments = set(self.oms.portfolio.positions) | set(self.oms.portfolio.blocked_positions)
+        for instrument_id in instruments:
+            qty = self._effective_position_qty(instrument_id)
+            if abs(qty) <= 1e-8:
+                continue
+            mark = self._mark_for_instrument(instrument_id, default_mark)
+            gross_notional += abs(qty * mark)
+
+        return gross_notional / total_value
 
     def _compute_daily_pnl_fraction(
         self,
@@ -335,6 +380,10 @@ class LiveTrader:
             )
 
     async def _resolve_liquidation_price(self, instrument_id: InstrumentId) -> float | None:
+        cached_mark = self._instrument_marks.get(instrument_id)
+        if cached_mark is not None and cached_mark > 0:
+            return cached_mark
+
         if (
             self._last_market_data is not None
             and self._last_market_data.instrument_id == instrument_id
@@ -518,6 +567,16 @@ class LiveTrader:
         try:
             await self.ems.start()
 
+            try:
+                self.oms.reconcile()
+                log.info("Startup OMS reconciliation completed")
+            except Exception as exc:
+                log.error(
+                    "Startup OMS reconciliation failed",
+                    error=str(exc),
+                    exc_info=True,
+                )
+
             while self.running:
                 # Heartbeat even if no data/decisions
                 self._publish_heartbeat()
@@ -535,6 +594,7 @@ class LiveTrader:
                     await asyncio.sleep(self.tick_interval)
                     continue
 
+                self._instrument_marks[market_data.instrument_id] = market_data.close
                 self._publish_telemetry(market_data)
                 log.info(
                     "Tick Received",
@@ -542,17 +602,16 @@ class LiveTrader:
                     price=market_data.close,
                 )
 
-                # Approximate exposure for risk layer
-                qty = self.oms.portfolio.positions.get(market_data.instrument_id, 0.0)
+                # Portfolio-level exposure for risk layer (multi-instrument aware,
+                # includes blocked inventory from pending CLOSE_LONG orders).
                 total_value = self._compute_total_value(market_data.close)
                 daily_pnl_fraction = self._compute_daily_pnl_fraction(
                     total_value,
                     market_data.timestamp,
                 )
-                portfolio_exposure = (
-                    abs(qty * market_data.close) / total_value
-                    if total_value > 0
-                    else 0.0
+                portfolio_exposure = self._compute_portfolio_exposure_fraction(
+                    market_data.close,
+                    total_value,
                 )
 
                 try:
