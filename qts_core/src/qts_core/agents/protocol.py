@@ -133,6 +133,8 @@ class ReviewRequest(BaseModel):
         instrument_id: Target instrument.
         current_price: Latest market price.
         portfolio_exposure: Current exposure to this instrument.
+        daily_pnl_fraction: Session/day PnL as fraction of start-of-day value.
+            Negative values indicate losses (e.g., -0.02 = -2%).
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -147,6 +149,10 @@ class ReviewRequest(BaseModel):
     portfolio_exposure: float = Field(
         default=0.0,
         description="Current position value as fraction of portfolio",
+    )
+    daily_pnl_fraction: float = Field(
+        default=0.0,
+        description="Session/day PnL fraction from start-of-day portfolio value",
     )
 
 

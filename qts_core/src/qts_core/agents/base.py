@@ -191,6 +191,20 @@ class BaseRiskAgent:
                 risk_metrics={"current_exposure": request.portfolio_exposure},
             )
 
+        # Check hard daily loss guardrail for non-exit actions.
+        if request.daily_pnl_fraction <= -self.max_daily_loss:
+            return RiskVerdict(
+                status=RiskStatus.REJECTED,
+                reason=(
+                    "Daily loss limit breached "
+                    f"({request.daily_pnl_fraction:.2%} <= -{self.max_daily_loss:.2%})"
+                ),
+                risk_metrics={
+                    "daily_pnl_fraction": request.daily_pnl_fraction,
+                    "max_daily_loss": self.max_daily_loss,
+                },
+            )
+
         # Check exposure limits
         if request.portfolio_exposure > self.max_position_size:
             return RiskVerdict(

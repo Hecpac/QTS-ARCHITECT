@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
+from omegaconf import OmegaConf
+
 # Ensure src/ is on the path for direct pytest runs
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
@@ -12,7 +14,7 @@ from qts_core.agents.base import StrictRiskAgent, TechnicalAgent
 from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.agents.supervisor import Supervisor
 from qts_core.common.types import InstrumentId, MarketData
-from qts_core.main_live import apply_execution_guardrails
+from qts_core.main_live import LiveTrader, apply_execution_guardrails
 from qts_core.execution.ems import ExecutionGateway, FillReport
 from qts_core.execution.oms import Order, OrderManagementSystem, OrderStatus, Portfolio
 from qts_core.execution.store import MemoryStore
@@ -40,6 +42,61 @@ class StubGateway(ExecutionGateway):
             quantity=order.quantity,
             fee=0.0,
         )
+
+
+def _build_live_trader() -> LiveTrader:
+    cfg = OmegaConf.create(
+        {
+            "env": "test",
+            "symbol": "BTC/USDT",
+            "oms": {
+                "initial_cash": 100_000.0,
+                "risk_fraction": 0.10,
+                "account_mode": "spot",
+                "short_leverage": 1.0,
+            },
+            "agents": {
+                "strategies": [
+                    {
+                        "_target_": "qts_core.agents.base.TechnicalAgent",
+                        "name": "TrendFollower_A",
+                        "min_confidence": 0.0,
+                    }
+                ],
+                "risk": {
+                    "_target_": "qts_core.agents.base.StrictRiskAgent",
+                    "name": "Risk",
+                },
+            },
+            "store": {
+                "_target_": "qts_core.execution.store.MemoryStore",
+            },
+            "gateway": {
+                "_target_": "qts_core.execution.ems.MockGateway",
+                "default_price": 100.0,
+                "latency_ms": 1.0,
+                "failure_rate": 0.0,
+                "partial_fill_rate": 0.0,
+            },
+            "loop": {
+                "tick_interval": 0.01,
+                "heartbeat_key": "SYSTEM:HEARTBEAT",
+                "execution_timeout": 0.1,
+            },
+            "execution_guardrails": {
+                "enabled": False,
+            },
+            "telemetry": {
+                "publish_views": False,
+                "metrics_keys": {
+                    "total_value": "METRICS:TOTAL_VALUE",
+                    "cash": "METRICS:CASH",
+                    "pnl_daily": "METRICS:PNL_DAILY",
+                },
+            },
+        }
+    )
+    return LiveTrader(cfg)
 
 
 def test_bullish_tick_creates_and_settles_order():
@@ -196,3 +253,49 @@ def test_guardrails_reject_high_estimated_slippage():
     )
 
     assert guarded is None
+
+
+def test_reconcile_helper_runs_after_ambiguous_submission():
+    trader = _build_live_trader()
+
+    # Simulate stale blocked cash with no open orders; reconcile should clear it.
+    trader.oms.portfolio.blocked_cash = 500.0
+    trader.store.save(trader.oms.PORTFOLIO_KEY, trader.oms.portfolio)
+
+    trader._reconcile_after_ambiguous_submission(
+        reason="unit_test_timeout",
+        order_id="unit-test-order",
+    )
+
+    refreshed = trader.store.load(trader.oms.PORTFOLIO_KEY, Portfolio)
+    assert refreshed is not None
+    assert refreshed.blocked_cash == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_halt_liquidation_attempts_to_close_open_positions() -> None:
+    trader = _build_live_trader()
+
+    instrument = InstrumentId("BTC/USDT")
+    trader.oms.portfolio.positions[instrument] = 1.0
+    trader.store.save(trader.oms.PORTFOLIO_KEY, trader.oms.portfolio)
+    trader._last_market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=10.0,
+    )
+
+    await trader.ems.start()
+    try:
+        await trader._liquidate_open_positions()
+    finally:
+        await trader.ems.stop()
+
+    refreshed = trader.store.load(trader.oms.PORTFOLIO_KEY, Portfolio)
+    assert refreshed is not None
+    assert refreshed.positions.get(instrument, 0.0) == pytest.approx(0.0)
+    assert refreshed.blocked_positions.get(instrument, 0.0) == pytest.approx(0.0)

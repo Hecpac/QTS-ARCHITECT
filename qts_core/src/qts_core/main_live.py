@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import hydra
@@ -12,7 +12,7 @@ import structlog
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from qts_core.agents.protocol import TradingDecision
+from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.agents.supervisor import Supervisor
 from qts_core.common.types import InstrumentId, MarketData
 from qts_core.execution.oms import OrderManagementSystem, OrderRequest
@@ -165,6 +165,10 @@ class LiveTrader:
         self._order_views: list[dict[str, Any]] = []
         self.running = True
 
+        # Daily PnL anchor for max_daily_loss enforcement in risk review.
+        self._daily_anchor_date: date | None = None
+        self._daily_anchor_value: float | None = None
+
     async def _fetch_live_data(self) -> MarketData:
         """Fetch live market data.
 
@@ -280,6 +284,170 @@ class LiveTrader:
             }
         )
 
+    def _compute_total_value(self, mark_price: float) -> float:
+        positions_value = sum(
+            qty * mark_price for qty in self.oms.portfolio.positions.values()
+        )
+        return (
+            self.oms.portfolio.cash
+            + self.oms.portfolio.blocked_cash
+            + positions_value
+        )
+
+    def _compute_daily_pnl_fraction(
+        self,
+        total_value: float,
+        asof: datetime,
+    ) -> float:
+        asof_date = asof.astimezone(timezone.utc).date()
+
+        if (
+            self._daily_anchor_date != asof_date
+            or self._daily_anchor_value is None
+            or self._daily_anchor_value <= 0
+        ):
+            self._daily_anchor_date = asof_date
+            self._daily_anchor_value = max(total_value, 0.0)
+            return 0.0
+
+        return (total_value - self._daily_anchor_value) / self._daily_anchor_value
+
+    def _reconcile_after_ambiguous_submission(
+        self,
+        *,
+        reason: str,
+        order_id: str,
+    ) -> None:
+        try:
+            self.oms.reconcile()
+            log.warning(
+                "OMS reconciliation executed after ambiguous submission",
+                reason=reason,
+                order_id=order_id,
+            )
+        except Exception as exc:
+            log.error(
+                "OMS reconciliation failed after ambiguous submission",
+                reason=reason,
+                order_id=order_id,
+                error=str(exc),
+                exc_info=True,
+            )
+
+    async def _resolve_liquidation_price(self, instrument_id: InstrumentId) -> float | None:
+        if (
+            self._last_market_data is not None
+            and self._last_market_data.instrument_id == instrument_id
+        ):
+            return self._last_market_data.close
+
+        exchange = getattr(self.ems, "exchange", None)
+        if exchange is None:
+            return None
+
+        try:
+            ticker = await exchange.fetch_ticker(str(instrument_id))
+        except Exception as exc:
+            log.error(
+                "Failed to fetch ticker during halt liquidation",
+                instrument=str(instrument_id),
+                error=str(exc),
+            )
+            return None
+
+        last_price = ticker.get("last") or ticker.get("close")
+        if not last_price:
+            return None
+
+        return float(last_price)
+
+    async def _liquidate_open_positions(self) -> None:
+        open_positions = {
+            instrument: qty
+            for instrument, qty in self.oms.portfolio.positions.items()
+            if abs(qty) > 1e-8
+        }
+
+        if not open_positions:
+            return
+
+        log.critical(
+            "Emergency halt liquidation started",
+            open_positions={str(k): v for k, v in open_positions.items()},
+        )
+
+        for instrument_id in list(open_positions):
+            liquidation_price = await self._resolve_liquidation_price(instrument_id)
+            if liquidation_price is None or liquidation_price <= 0:
+                log.error(
+                    "Skipping halt liquidation due to missing price",
+                    instrument=str(instrument_id),
+                )
+                continue
+
+            decision = TradingDecision(
+                instrument_id=instrument_id,
+                action=SignalType.EXIT,
+                quantity_modifier=1.0,
+                rationale="Emergency halt liquidation",
+                contributing_agents=["SYSTEM_HALT"],
+            )
+            order_request = self.oms.process_decision(decision, current_price=liquidation_price)
+            if order_request is None:
+                continue
+
+            try:
+                fill_report = await asyncio.wait_for(
+                    self.ems.submit_order(order_request),
+                    timeout=self.execution_timeout,
+                )
+            except asyncio.TimeoutError:
+                log.error(
+                    "Halt liquidation timed out; preserving reservation for reconciliation",
+                    order_id=order_request.oms_order_id,
+                    timeout_seconds=self.execution_timeout,
+                )
+                self._reconcile_after_ambiguous_submission(
+                    reason="halt_liquidation_timeout",
+                    order_id=order_request.oms_order_id,
+                )
+                continue
+            except Exception as exc:
+                log.error(
+                    "Halt liquidation submission failed; reverting allocation",
+                    order_id=order_request.oms_order_id,
+                    error=str(exc),
+                )
+                self.oms.revert_allocation(order_request.oms_order_id)
+                continue
+
+            if fill_report is None:
+                log.error(
+                    "Halt liquidation returned no fill; reverting allocation",
+                    order_id=order_request.oms_order_id,
+                )
+                self.oms.revert_allocation(order_request.oms_order_id)
+                continue
+
+            try:
+                self.oms.confirm_execution(
+                    oms_order_id=fill_report.oms_order_id,
+                    fill_price=fill_report.price,
+                    fill_qty=fill_report.quantity,
+                    fee=fill_report.fee,
+                    exchange_trade_id=fill_report.exchange_order_id,
+                )
+            except Exception as exc:
+                log.error(
+                    "Halt liquidation confirmation failed; preserving reservation for reconciliation",
+                    order_id=order_request.oms_order_id,
+                    error=str(exc),
+                )
+                self._reconcile_after_ambiguous_submission(
+                    reason="halt_liquidation_confirm_failed",
+                    order_id=order_request.oms_order_id,
+                )
+
     def _publish_heartbeat(self) -> None:
         try:
             self.store.set(self.heartbeat_key, datetime.now(timezone.utc).isoformat())
@@ -299,19 +467,16 @@ class LiveTrader:
         try:
             # Remember last good tick so we can publish even if the next fetch fails.
             self._last_market_data = market_data
-            positions_value = sum(
-                qty * market_data.close for qty in self.oms.portfolio.positions.values()
-            )
-            total_value = (
-                self.oms.portfolio.cash
-                + self.oms.portfolio.blocked_cash
-                + positions_value
+            total_value = self._compute_total_value(market_data.close)
+            daily_pnl_fraction = self._compute_daily_pnl_fraction(
+                total_value,
+                market_data.timestamp,
             )
 
             metrics_keys = telemetry_cfg.metrics_keys
             self.store.set(metrics_keys.total_value, str(total_value))
             self.store.set(metrics_keys.cash, str(self.oms.portfolio.cash))
-            self.store.set(metrics_keys.pnl_daily, str(0.0))
+            self.store.set(metrics_keys.pnl_daily, str(daily_pnl_fraction))
 
             last_price_key = telemetry_cfg.get("last_price_key", "MARKET:LAST_PRICE")
             last_tick_key = telemetry_cfg.get("last_tick_key", "MARKET:LAST_TICK")
@@ -358,7 +523,8 @@ class LiveTrader:
                 self._publish_heartbeat()
 
                 if self._halt_requested():
-                    log.critical("SYSTEM HALT DETECTED. Shutting down immediately.")
+                    log.critical("SYSTEM HALT DETECTED. Starting emergency liquidation.")
+                    await self._liquidate_open_positions()
                     await self.ems.stop()
                     return
 
@@ -378,14 +544,10 @@ class LiveTrader:
 
                 # Approximate exposure for risk layer
                 qty = self.oms.portfolio.positions.get(market_data.instrument_id, 0.0)
-                positions_value = sum(
-                    pos_qty * market_data.close
-                    for pos_qty in self.oms.portfolio.positions.values()
-                )
-                total_value = (
-                    self.oms.portfolio.cash
-                    + self.oms.portfolio.blocked_cash
-                    + positions_value
+                total_value = self._compute_total_value(market_data.close)
+                daily_pnl_fraction = self._compute_daily_pnl_fraction(
+                    total_value,
+                    market_data.timestamp,
                 )
                 portfolio_exposure = (
                     abs(qty * market_data.close) / total_value
@@ -398,6 +560,7 @@ class LiveTrader:
                         market_data,
                         ohlcv_history=self._last_ohlcv_history,
                         portfolio_exposure=portfolio_exposure,
+                        daily_pnl_fraction=daily_pnl_fraction,
                     )
                 except Exception as exc:
                     log.error("Strategy Execution Failed", error=str(exc))
@@ -446,6 +609,10 @@ class LiveTrader:
                         order_id=order_request.oms_order_id,
                         timeout_seconds=self.execution_timeout,
                     )
+                    self._reconcile_after_ambiguous_submission(
+                        reason="submit_timeout",
+                        order_id=order_request.oms_order_id,
+                    )
                     continue
                 except Exception as exc:
                     log.error(
@@ -469,6 +636,10 @@ class LiveTrader:
                         log.error(
                             "Order confirmation failed; preserving reservation for reconciliation",
                             error=str(exc),
+                            order_id=order_request.oms_order_id,
+                        )
+                        self._reconcile_after_ambiguous_submission(
+                            reason="confirm_failed",
                             order_id=order_request.oms_order_id,
                         )
                         continue

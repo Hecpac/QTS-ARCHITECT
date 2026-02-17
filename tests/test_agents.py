@@ -283,6 +283,36 @@ class TestRiskAgents:
         assert verdict.status == RiskStatus.APPROVED
 
     @pytest.mark.asyncio
+    async def test_strict_agent_rejects_daily_loss_breach(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """StrictRiskAgent should reject entries when daily loss limit is breached."""
+        agent = StrictRiskAgent(
+            name="strict_risk",
+            min_signal_confidence=0.7,
+            max_daily_loss=0.02,
+        )
+
+        signal = AgentSignal(
+            source_agent="test",
+            signal_type=SignalType.LONG,
+            confidence=0.85,
+        )
+
+        request = ReviewRequest(
+            proposed_signal=signal,
+            instrument_id=instrument_id,
+            current_price=100.0,
+            daily_pnl_fraction=-0.03,
+        )
+
+        verdict = await agent.evaluate(request)
+
+        assert verdict.status == RiskStatus.REJECTED
+        assert "Daily loss limit breached" in verdict.reason
+
+    @pytest.mark.asyncio
     async def test_permissive_agent_approves_all(
         self,
         instrument_id: InstrumentId,
@@ -329,6 +359,7 @@ class TestRiskAgents:
             instrument_id=instrument_id,
             current_price=100.0,
             portfolio_exposure=0.50,
+            daily_pnl_fraction=-0.25,
         )
 
         verdict = await agent.evaluate(request)
