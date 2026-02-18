@@ -7,7 +7,14 @@ import plotly.graph_objects as go
 import redis
 import streamlit as st
 
-from qts_core.dashboard.utils import heartbeat_age_seconds, load_alert_events, safe_float, safe_json
+from qts_core.dashboard.utils import (
+    heartbeat_age_seconds,
+    load_alert_events,
+    parse_active_symbols,
+    safe_float,
+    safe_json,
+    symbol_scoped_key,
+)
 
 
 # --------------------------------------------------------------------
@@ -75,23 +82,63 @@ st.divider()
 # --------------------------------------------------------------------
 # DATA FETCH
 # --------------------------------------------------------------------
+default_symbols_env = os.getenv("DEFAULT_ACTIVE_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT")
+default_symbols = [item.strip() for item in default_symbols_env.split(",") if item.strip()]
+if not default_symbols:
+    default_symbols = ["BTC/USDT"]
+
+active_symbols = default_symbols
+try:
+    active_symbols = parse_active_symbols(redis_client.get("MARKET:ACTIVE_SYMBOLS")) or default_symbols
+except Exception:
+    active_symbols = default_symbols
+
+selected_symbol = st.selectbox("Activo", options=active_symbols, index=0)
+
 try:
     total_val = safe_float(redis_client.get("METRICS:TOTAL_VALUE"))
     cash = safe_float(redis_client.get("METRICS:CASH"))
-    last_price = safe_float(redis_client.get("MARKET:LAST_PRICE"))
     daily_pnl_fraction = safe_float(redis_client.get("METRICS:PNL_DAILY"))
 
+    symbol_last_price_key = symbol_scoped_key("MARKET:LAST_PRICE", selected_symbol)
+    symbol_ohlcv_key = symbol_scoped_key("MARKET:OHLCV", selected_symbol)
+
+    last_price = safe_float(
+        redis_client.get(symbol_last_price_key) or redis_client.get("MARKET:LAST_PRICE")
+    )
+
     latency_tick_to_decision = safe_float(
-        redis_client.get("METRICS:LATENCY:TICK_TO_DECISION_MS")
+        redis_client.get(
+            symbol_scoped_key("METRICS:LATENCY:TICK_TO_DECISION_MS", selected_symbol)
+        )
+        or redis_client.get("METRICS:LATENCY:TICK_TO_DECISION_MS")
     )
     latency_decision_to_fill = safe_float(
-        redis_client.get("METRICS:LATENCY:DECISION_TO_FILL_MS")
+        redis_client.get(
+            symbol_scoped_key("METRICS:LATENCY:DECISION_TO_FILL_MS", selected_symbol)
+        )
+        or redis_client.get("METRICS:LATENCY:DECISION_TO_FILL_MS")
     )
-    latency_tick_to_fill = safe_float(redis_client.get("METRICS:LATENCY:TICK_TO_FILL_MS"))
+    latency_tick_to_fill = safe_float(
+        redis_client.get(symbol_scoped_key("METRICS:LATENCY:TICK_TO_FILL_MS", selected_symbol))
+        or redis_client.get("METRICS:LATENCY:TICK_TO_FILL_MS")
+    )
 
-    raw_ohlcv = redis_client.get("MARKET:OHLCV")
+    raw_ohlcv = redis_client.get(symbol_ohlcv_key) or redis_client.get("MARKET:OHLCV")
     raw_pos = redis_client.get("VIEW:POSITIONS")
     raw_ord = redis_client.get("VIEW:ORDERS")
+
+    asset_snapshot_rows: list[dict[str, str | float]] = []
+    for symbol in active_symbols:
+        scoped_price = redis_client.get(symbol_scoped_key("MARKET:LAST_PRICE", symbol))
+        if scoped_price is None:
+            continue
+        asset_snapshot_rows.append(
+            {
+                "symbol": symbol,
+                "last_price": safe_float(scoped_price),
+            }
+        )
 
     last_heartbeat_raw = redis_client.get("SYSTEM:HEARTBEAT")
     last_alert_raw = redis_client.get("ALERTS:LAST")
@@ -108,6 +155,7 @@ except Exception:
     raw_ohlcv = None
     raw_pos = None
     raw_ord = None
+    asset_snapshot_rows = []
 
     last_heartbeat_raw = None
     last_alert_raw = None
@@ -122,7 +170,7 @@ heartbeat_stale_seconds = int(os.getenv("HEARTBEAT_STALE_SECONDS", "15"))
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("💰 Total Equity", f"${total_val:,.2f}")
 m2.metric("💵 Cash Available", f"${cash:,.2f}")
-m3.metric("BTC Price", f"${last_price:,.2f}")
+m3.metric(f"{selected_symbol} Price", f"${last_price:,.2f}")
 m4.metric("Daily PnL", f"{daily_pnl_fraction * 100:+.2f}%")
 if heartbeat_age is None:
     m5.metric("Heartbeat Age", "N/A")
@@ -144,6 +192,10 @@ elif heartbeat_age > heartbeat_stale_seconds:
     st.error(
         f"Heartbeat stale: {heartbeat_age:,.1f}s (> {heartbeat_stale_seconds}s)."
     )
+
+if asset_snapshot_rows:
+    st.subheader("Market Watch")
+    st.dataframe(asset_snapshot_rows, use_container_width=True)
 
 # --------------------------------------------------------------------
 # TABS
@@ -168,7 +220,7 @@ with tab_chart:
             ]
         )
         fig.update_layout(
-            title="BTC/USD - Live Action",
+            title=f"{selected_symbol} - Live Action",
             height=500,
             template="plotly_dark",
             xaxis_rangeslider_visible=False,

@@ -5,6 +5,11 @@ defaults:
 
 env: "dev"
 symbol: "BTC/USDT"
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+  - "SOL/USDT"
+  - "XRP/USDT"
 
 oms:
   initial_cash: 100000.0

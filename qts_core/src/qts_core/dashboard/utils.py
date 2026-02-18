@@ -25,6 +25,34 @@ def safe_json(raw: str | None, default: Any) -> Any:
         return default
 
 
+def symbol_key_suffix(symbol: str) -> str:
+    """Normalize symbol into Redis key suffix (e.g. BTC/USDT -> BTC_USDT)."""
+    return symbol.upper().replace("/", "_").replace(":", "_").replace("-", "_")
+
+
+def symbol_scoped_key(base_key: str, symbol: str) -> str:
+    """Build symbol-scoped key from a base key."""
+    return f"{base_key}:{symbol_key_suffix(symbol)}"
+
+
+def parse_active_symbols(raw: str | None) -> list[str]:
+    """Parse active symbols payload from Redis into a normalized list."""
+    parsed = safe_json(raw, default=[])
+    if not isinstance(parsed, list):
+        return []
+
+    symbols: list[str] = []
+    for item in parsed:
+        value = str(item).strip()
+        if not value:
+            continue
+        if value in symbols:
+            continue
+        symbols.append(value)
+
+    return symbols
+
+
 def heartbeat_age_seconds(
     heartbeat_iso: str | None,
     *,

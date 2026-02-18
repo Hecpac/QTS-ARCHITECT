@@ -313,6 +313,56 @@ def test_publish_latency_metrics_writes_configured_keys() -> None:
     assert trader.store.get("METRICS:LATENCY:TICK_TO_FILL_MS") == "42.5"
 
 
+def test_publish_latency_metrics_writes_symbol_scoped_keys() -> None:
+    trader = _build_live_trader()
+
+    trader._publish_latency_metrics(
+        tick_to_decision_ms=10.0,
+        decision_to_fill_ms=20.0,
+        tick_to_fill_ms=30.0,
+        symbol="ETH/USDT",
+    )
+
+    assert trader.store.get("METRICS:LATENCY:TICK_TO_DECISION_MS:ETH_USDT") == "10.0"
+    assert trader.store.get("METRICS:LATENCY:DECISION_TO_FILL_MS:ETH_USDT") == "20.0"
+    assert trader.store.get("METRICS:LATENCY:TICK_TO_FILL_MS:ETH_USDT") == "30.0"
+
+
+def test_publish_telemetry_writes_symbol_scoped_market_keys() -> None:
+    trader = _build_live_trader()
+    trader.symbols = ["BTC/USDT", "ETH/USDT"]
+
+    market_data = MarketData(
+        instrument_id=InstrumentId("ETH/USDT"),
+        timestamp=datetime.now(timezone.utc),
+        open=2000.0,
+        high=2010.0,
+        low=1990.0,
+        close=2005.0,
+        volume=15.0,
+    )
+    trader._last_ohlcv_payload = [
+        {
+            "timestamp": market_data.timestamp.isoformat(),
+            "open": market_data.open,
+            "high": market_data.high,
+            "low": market_data.low,
+            "close": market_data.close,
+            "volume": market_data.volume,
+        }
+    ]
+
+    trader._publish_telemetry(market_data)
+
+    assert trader.store.get("MARKET:LAST_PRICE:ETH_USDT") == "2005.0"
+    assert trader.store.get("MARKET:OHLCV:ETH_USDT") is not None
+
+    active_symbols = trader.store.get("MARKET:ACTIVE_SYMBOLS")
+    assert active_symbols is not None
+    assert "BTC/USDT" in active_symbols
+    assert "ETH/USDT" in active_symbols
+
+
 def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() -> None:
     trader = _build_live_trader()
 

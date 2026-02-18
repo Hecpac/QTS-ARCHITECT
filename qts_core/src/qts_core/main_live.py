@@ -112,7 +112,20 @@ class LiveTrader:
     def __init__(self, cfg: DictConfig) -> None:
         """Initialize the live trader from a Hydra config."""
         self.cfg = cfg
-        self.symbol: str = cfg.get("symbol", "BTC/USDT")
+
+        configured_symbols = cfg.get("symbols")
+        if configured_symbols:
+            if isinstance(configured_symbols, str):
+                parsed_symbols = [configured_symbols]
+            else:
+                parsed_symbols = [str(item) for item in configured_symbols]
+        else:
+            parsed_symbols = [str(cfg.get("symbol", "BTC/USDT"))]
+
+        normalized_symbols = [symbol.strip() for symbol in parsed_symbols if symbol.strip()]
+        self.symbols: list[str] = list(dict.fromkeys(normalized_symbols)) or ["BTC/USDT"]
+        self.symbol: str = self.symbols[0]
+
         self.tick_interval: float = float(cfg.loop.get("tick_interval", 1.0))
         self.heartbeat_key: str = cfg.loop.get("heartbeat_key", "SYSTEM:HEARTBEAT")
         self.execution_timeout: float = max(
@@ -295,6 +308,14 @@ class LiveTrader:
             }
         )
 
+    @staticmethod
+    def _symbol_key_suffix(symbol: str) -> str:
+        return symbol.upper().replace("/", "_").replace(":", "_").replace("-", "_")
+
+    @classmethod
+    def _symbol_scoped_key(cls, base_key: str, symbol: str) -> str:
+        return f"{base_key}:{cls._symbol_key_suffix(symbol)}"
+
     def _emit_alert(
         self,
         *,
@@ -337,6 +358,7 @@ class LiveTrader:
         tick_to_decision_ms: float | None = None,
         decision_to_fill_ms: float | None = None,
         tick_to_fill_ms: float | None = None,
+        symbol: str | None = None,
     ) -> None:
         telemetry_cfg = self.cfg.get("telemetry")
         if not telemetry_cfg:
@@ -347,32 +369,45 @@ class LiveTrader:
             return
 
         try:
+            tick_to_decision_key = latency_cfg.get(
+                "tick_to_decision_ms",
+                "METRICS:LATENCY:TICK_TO_DECISION_MS",
+            )
+            decision_to_fill_key = latency_cfg.get(
+                "decision_to_fill_ms",
+                "METRICS:LATENCY:DECISION_TO_FILL_MS",
+            )
+            tick_to_fill_key = latency_cfg.get(
+                "tick_to_fill_ms",
+                "METRICS:LATENCY:TICK_TO_FILL_MS",
+            )
+
             if tick_to_decision_ms is not None:
-                self.store.set(
-                    latency_cfg.get(
-                        "tick_to_decision_ms",
-                        "METRICS:LATENCY:TICK_TO_DECISION_MS",
-                    ),
-                    str(tick_to_decision_ms),
-                )
+                serialized = str(tick_to_decision_ms)
+                self.store.set(tick_to_decision_key, serialized)
+                if symbol:
+                    self.store.set(
+                        self._symbol_scoped_key(tick_to_decision_key, symbol),
+                        serialized,
+                    )
 
             if decision_to_fill_ms is not None:
-                self.store.set(
-                    latency_cfg.get(
-                        "decision_to_fill_ms",
-                        "METRICS:LATENCY:DECISION_TO_FILL_MS",
-                    ),
-                    str(decision_to_fill_ms),
-                )
+                serialized = str(decision_to_fill_ms)
+                self.store.set(decision_to_fill_key, serialized)
+                if symbol:
+                    self.store.set(
+                        self._symbol_scoped_key(decision_to_fill_key, symbol),
+                        serialized,
+                    )
 
             if tick_to_fill_ms is not None:
-                self.store.set(
-                    latency_cfg.get(
-                        "tick_to_fill_ms",
-                        "METRICS:LATENCY:TICK_TO_FILL_MS",
-                    ),
-                    str(tick_to_fill_ms),
-                )
+                serialized = str(tick_to_fill_ms)
+                self.store.set(tick_to_fill_key, serialized)
+                if symbol:
+                    self.store.set(
+                        self._symbol_scoped_key(tick_to_fill_key, symbol),
+                        serialized,
+                    )
         except Exception as exc:
             log.warning("Latency metrics publish failed", error=str(exc))
 
@@ -691,21 +726,31 @@ class LiveTrader:
             positions_key = telemetry_cfg.get("positions_key", "VIEW:POSITIONS")
             orders_key = telemetry_cfg.get("orders_key", "VIEW:ORDERS")
 
-            # Always publish price keys
+            instrument_symbol = str(market_data.instrument_id)
+            self.store.set("MARKET:ACTIVE_SYMBOLS", json.dumps(self.symbols))
+
+            # Always publish canonical keys for backwards compatibility.
             self.store.set(last_price_key, str(market_data.close))
-            self.store.set(
-                last_tick_key,
-                json.dumps(
-                    {
-                        "symbol": str(market_data.instrument_id),
-                        "price": market_data.close,
-                        "timestamp": market_data.timestamp.isoformat(),
-                    }
-                ),
+            last_tick_payload = json.dumps(
+                {
+                    "symbol": instrument_symbol,
+                    "price": market_data.close,
+                    "timestamp": market_data.timestamp.isoformat(),
+                }
             )
+            self.store.set(last_tick_key, last_tick_payload)
+
+            # Also publish per-symbol keys for multi-asset dashboards.
+            scoped_last_price_key = self._symbol_scoped_key(last_price_key, instrument_symbol)
+            scoped_last_tick_key = self._symbol_scoped_key(last_tick_key, instrument_symbol)
+            self.store.set(scoped_last_price_key, str(market_data.close))
+            self.store.set(scoped_last_tick_key, last_tick_payload)
 
             if self._last_ohlcv_payload:
-                self.store.set(ohlcv_key, json.dumps(self._last_ohlcv_payload))
+                serialized_ohlcv = json.dumps(self._last_ohlcv_payload)
+                self.store.set(ohlcv_key, serialized_ohlcv)
+                scoped_ohlcv_key = self._symbol_scoped_key(ohlcv_key, instrument_symbol)
+                self.store.set(scoped_ohlcv_key, serialized_ohlcv)
 
             positions_payload = [
                 {"instrument_id": str(instr), "quantity": qty}
@@ -717,6 +762,221 @@ class LiveTrader:
                 self.store.set(orders_key, json.dumps(self._order_views[-50:]))
         except Exception as exc:
             log.error("Telemetry publish failed", error=str(exc), exc_info=True)
+
+    async def _process_symbol_tick(self, symbol: str) -> None:  # noqa: PLR0915
+        self.symbol = symbol
+
+        try:
+            market_data = await self._fetch_live_data()
+        except Exception as exc:
+            log.error("Data Feed Error", symbol=symbol, error=str(exc))
+            return
+
+        instrument_symbol = str(market_data.instrument_id)
+        self._instrument_marks[market_data.instrument_id] = market_data.close
+        self._publish_telemetry(market_data)
+        log.info(
+            "Tick Received",
+            symbol=market_data.instrument_id,
+            price=market_data.close,
+        )
+
+        tick_started_at = time.monotonic()
+
+        # Portfolio-level exposure for risk layer (multi-instrument aware,
+        # includes blocked inventory from pending CLOSE_LONG orders).
+        total_value = self._compute_total_value(market_data.close)
+        daily_pnl_fraction = self._compute_daily_pnl_fraction(
+            total_value,
+            market_data.timestamp,
+        )
+        portfolio_exposure = self._compute_portfolio_exposure_fraction(
+            market_data.close,
+            total_value,
+        )
+
+        session_drawdown = self._compute_session_drawdown_fraction(total_value)
+        if (
+            self.max_session_drawdown > 0
+            and session_drawdown >= self.max_session_drawdown
+        ):
+            await self._trigger_emergency_halt(
+                reason="session_drawdown_limit_breached",
+                total_value=total_value,
+            )
+            return
+
+        try:
+            decision = await self.supervisor.run(
+                market_data,
+                ohlcv_history=self._last_ohlcv_history,
+                portfolio_exposure=portfolio_exposure,
+                daily_pnl_fraction=daily_pnl_fraction,
+            )
+        except Exception as exc:
+            self._publish_latency_metrics(
+                tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                symbol=instrument_symbol,
+            )
+            log.error("Strategy Execution Failed", symbol=instrument_symbol, error=str(exc))
+            self._emit_alert(
+                level="ERROR",
+                event="STRATEGY_EXECUTION_FAILED",
+                message="Supervisor execution failed",
+                details={"error": str(exc), "symbol": instrument_symbol},
+            )
+            return
+
+        self._publish_latency_metrics(
+            tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
+            symbol=instrument_symbol,
+        )
+
+        if not decision:
+            return
+
+        guarded_decision = apply_execution_guardrails(
+            decision,
+            market_data,
+            enabled=self.guardrails_enabled,
+            min_volume=self.guardrails_min_volume,
+            max_intrabar_volatility=self.guardrails_max_intrabar_volatility,
+            high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
+            max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
+            slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
+        )
+        if not guarded_decision:
+            log.warning(
+                "Order rejected by execution guardrails",
+                instrument=market_data.instrument_id,
+                volume=market_data.volume,
+                intrabar_volatility=max(
+                    0.0,
+                    (market_data.high - market_data.low) / market_data.close,
+                ),
+            )
+            return
+
+        order_request = self.oms.process_decision(
+            guarded_decision,
+            current_price=market_data.close,
+        )
+        if not order_request:
+            return
+
+        submit_started_at = time.monotonic()
+
+        try:
+            fill_report = await asyncio.wait_for(
+                self.ems.submit_order(order_request),
+                timeout=self.execution_timeout,
+            )
+        except asyncio.TimeoutError:
+            self._publish_latency_metrics(
+                decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                symbol=instrument_symbol,
+            )
+            log.error(
+                "Order submission timed out; preserving reservation for reconciliation",
+                order_id=order_request.oms_order_id,
+                timeout_seconds=self.execution_timeout,
+            )
+            self._emit_alert(
+                level="WARNING",
+                event="ORDER_SUBMISSION_TIMEOUT",
+                message="Order submission timed out",
+                details={
+                    "order_id": order_request.oms_order_id,
+                    "timeout_seconds": self.execution_timeout,
+                    "symbol": instrument_symbol,
+                },
+            )
+            await self._reconcile_after_ambiguous_submission(
+                reason="submit_timeout",
+                order_id=order_request.oms_order_id,
+            )
+            return
+        except Exception as exc:
+            self._publish_latency_metrics(
+                decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                symbol=instrument_symbol,
+            )
+            log.error(
+                "Order Submission Failed",
+                error=str(exc),
+                order_id=order_request.oms_order_id,
+            )
+            self._emit_alert(
+                level="ERROR",
+                event="ORDER_SUBMISSION_FAILED",
+                message="Order submission raised an exception",
+                details={
+                    "order_id": order_request.oms_order_id,
+                    "error": str(exc),
+                    "symbol": instrument_symbol,
+                },
+            )
+            self.oms.revert_allocation(order_request.oms_order_id)
+            return
+
+        if fill_report:
+            self._publish_latency_metrics(
+                decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                symbol=instrument_symbol,
+            )
+            try:
+                self.oms.confirm_execution(
+                    oms_order_id=fill_report.oms_order_id,
+                    fill_price=fill_report.price,
+                    fill_qty=fill_report.quantity,
+                    fee=fill_report.fee,
+                    exchange_trade_id=fill_report.exchange_order_id,
+                    exchange_order_id=fill_report.exchange_order_id,
+                )
+            except Exception as exc:
+                log.error(
+                    "Order confirmation failed; preserving reservation for reconciliation",
+                    error=str(exc),
+                    order_id=order_request.oms_order_id,
+                )
+                self._emit_alert(
+                    level="ERROR",
+                    event="ORDER_CONFIRMATION_FAILED",
+                    message="Order confirmation failed",
+                    details={
+                        "order_id": order_request.oms_order_id,
+                        "error": str(exc),
+                        "symbol": instrument_symbol,
+                    },
+                )
+                await self._reconcile_after_ambiguous_submission(
+                    reason="confirm_failed",
+                    order_id=order_request.oms_order_id,
+                )
+                return
+            self._record_order_view(order_request, fill_report)
+        else:
+            self._publish_latency_metrics(
+                decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                symbol=instrument_symbol,
+            )
+            log.error(
+                "Order Submission Failed or No Report",
+                order_id=order_request.oms_order_id,
+            )
+            self._emit_alert(
+                level="ERROR",
+                event="ORDER_NO_FILL_REPORT",
+                message="Order submission returned no fill report",
+                details={"order_id": order_request.oms_order_id, "symbol": instrument_symbol},
+            )
+            self.oms.revert_allocation(order_request.oms_order_id)
+
+        self._publish_telemetry(market_data)
 
     async def run(self) -> None:  # noqa: PLR0915
         """Run the live trading loop until stopped or halted."""
@@ -754,208 +1014,32 @@ class LiveTrader:
                     await self._trigger_emergency_halt(reason="external_halt_flag")
                     return
 
-                try:
-                    market_data = await self._fetch_live_data()
-                except Exception as exc:
-                    log.error("Data Feed Error", error=str(exc))
-                    await asyncio.sleep(self.tick_interval)
-                    continue
+                for symbol in self.symbols:
+                    if not self.running:
+                        break
 
-                self._instrument_marks[market_data.instrument_id] = market_data.close
-                self._publish_telemetry(market_data)
-                log.info(
-                    "Tick Received",
-                    symbol=market_data.instrument_id,
-                    price=market_data.close,
-                )
+                    if self._halt_requested():
+                        await self._trigger_emergency_halt(reason="external_halt_flag")
+                        return
 
-                tick_started_at = time.monotonic()
-
-                # Portfolio-level exposure for risk layer (multi-instrument aware,
-                # includes blocked inventory from pending CLOSE_LONG orders).
-                total_value = self._compute_total_value(market_data.close)
-                daily_pnl_fraction = self._compute_daily_pnl_fraction(
-                    total_value,
-                    market_data.timestamp,
-                )
-                portfolio_exposure = self._compute_portfolio_exposure_fraction(
-                    market_data.close,
-                    total_value,
-                )
-
-                session_drawdown = self._compute_session_drawdown_fraction(total_value)
-                if (
-                    self.max_session_drawdown > 0
-                    and session_drawdown >= self.max_session_drawdown
-                ):
-                    await self._trigger_emergency_halt(
-                        reason="session_drawdown_limit_breached",
-                        total_value=total_value,
-                    )
-                    return
-
-                try:
-                    decision = await self.supervisor.run(
-                        market_data,
-                        ohlcv_history=self._last_ohlcv_history,
-                        portfolio_exposure=portfolio_exposure,
-                        daily_pnl_fraction=daily_pnl_fraction,
-                    )
-                except Exception as exc:
-                    self._publish_latency_metrics(
-                        tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                    )
-                    log.error("Strategy Execution Failed", error=str(exc))
-                    self._emit_alert(
-                        level="ERROR",
-                        event="STRATEGY_EXECUTION_FAILED",
-                        message="Supervisor execution failed",
-                        details={"error": str(exc)},
-                    )
-                    continue
-
-                self._publish_latency_metrics(
-                    tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                )
-
-                if not decision:
-                    continue
-
-                guarded_decision = apply_execution_guardrails(
-                    decision,
-                    market_data,
-                    enabled=self.guardrails_enabled,
-                    min_volume=self.guardrails_min_volume,
-                    max_intrabar_volatility=self.guardrails_max_intrabar_volatility,
-                    high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
-                    max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
-                    slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
-                )
-                if not guarded_decision:
-                    log.warning(
-                        "Order rejected by execution guardrails",
-                        instrument=market_data.instrument_id,
-                        volume=market_data.volume,
-                        intrabar_volatility=max(
-                            0.0,
-                            (market_data.high - market_data.low) / market_data.close,
-                        ),
-                    )
-                    continue
-
-                order_request = self.oms.process_decision(
-                    guarded_decision,
-                    current_price=market_data.close,
-                )
-                if not order_request:
-                    continue
-
-                submit_started_at = time.monotonic()
-
-                try:
-                    fill_report = await asyncio.wait_for(
-                        self.ems.submit_order(order_request),
-                        timeout=self.execution_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    self._publish_latency_metrics(
-                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
-                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                    )
-                    log.error(
-                        "Order submission timed out; preserving reservation for reconciliation",
-                        order_id=order_request.oms_order_id,
-                        timeout_seconds=self.execution_timeout,
-                    )
-                    self._emit_alert(
-                        level="WARNING",
-                        event="ORDER_SUBMISSION_TIMEOUT",
-                        message="Order submission timed out",
-                        details={
-                            "order_id": order_request.oms_order_id,
-                            "timeout_seconds": self.execution_timeout,
-                        },
-                    )
-                    await self._reconcile_after_ambiguous_submission(
-                        reason="submit_timeout",
-                        order_id=order_request.oms_order_id,
-                    )
-                    continue
-                except Exception as exc:
-                    self._publish_latency_metrics(
-                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
-                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                    )
-                    log.error(
-                        "Order Submission Failed",
-                        error=str(exc),
-                        order_id=order_request.oms_order_id,
-                    )
-                    self._emit_alert(
-                        level="ERROR",
-                        event="ORDER_SUBMISSION_FAILED",
-                        message="Order submission raised an exception",
-                        details={
-                            "order_id": order_request.oms_order_id,
-                            "error": str(exc),
-                        },
-                    )
-                    self.oms.revert_allocation(order_request.oms_order_id)
-                    continue
-
-                if fill_report:
-                    self._publish_latency_metrics(
-                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
-                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                    )
                     try:
-                        self.oms.confirm_execution(
-                            oms_order_id=fill_report.oms_order_id,
-                            fill_price=fill_report.price,
-                            fill_qty=fill_report.quantity,
-                            fee=fill_report.fee,
-                            exchange_trade_id=fill_report.exchange_order_id,
-                            exchange_order_id=fill_report.exchange_order_id,
-                        )
+                        await self._process_symbol_tick(symbol)
                     except Exception as exc:
                         log.error(
-                            "Order confirmation failed; preserving reservation for reconciliation",
+                            "Unhandled symbol tick failure",
+                            symbol=symbol,
                             error=str(exc),
-                            order_id=order_request.oms_order_id,
+                            exc_info=True,
                         )
                         self._emit_alert(
                             level="ERROR",
-                            event="ORDER_CONFIRMATION_FAILED",
-                            message="Order confirmation failed",
-                            details={
-                                "order_id": order_request.oms_order_id,
-                                "error": str(exc),
-                            },
+                            event="SYMBOL_TICK_FAILED",
+                            message="Unhandled exception while processing symbol tick",
+                            details={"symbol": symbol, "error": str(exc)},
                         )
-                        await self._reconcile_after_ambiguous_submission(
-                            reason="confirm_failed",
-                            order_id=order_request.oms_order_id,
-                        )
-                        continue
-                    self._record_order_view(order_request, fill_report)
-                else:
-                    self._publish_latency_metrics(
-                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
-                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                    )
-                    log.error(
-                        "Order Submission Failed or No Report",
-                        order_id=order_request.oms_order_id,
-                    )
-                    self._emit_alert(
-                        level="ERROR",
-                        event="ORDER_NO_FILL_REPORT",
-                        message="Order submission returned no fill report",
-                        details={"order_id": order_request.oms_order_id},
-                    )
-                    self.oms.revert_allocation(order_request.oms_order_id)
 
-                self._publish_telemetry(market_data)
+                if getattr(self.ems, "exchange", None) is not None:
+                    await asyncio.sleep(self.tick_interval)
 
         except KeyboardInterrupt:
             log.info("Manual Shutdown Requested")

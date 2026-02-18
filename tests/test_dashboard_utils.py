@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from qts_core.dashboard.utils import heartbeat_age_seconds, load_alert_events, safe_float
+from qts_core.dashboard.utils import (
+    heartbeat_age_seconds,
+    load_alert_events,
+    parse_active_symbols,
+    safe_float,
+    symbol_key_suffix,
+    symbol_scoped_key,
+)
 
 
 class FakeRedis:
@@ -27,6 +34,16 @@ def test_safe_float_returns_default_on_invalid_input() -> None:
     assert safe_float("12.5") == 12.5
     assert safe_float("bad", default=3.0) == 3.0
     assert safe_float(None, default=7.0) == 7.0
+
+
+def test_symbol_key_helpers() -> None:
+    assert symbol_key_suffix("BTC/USDT") == "BTC_USDT"
+    assert symbol_scoped_key("MARKET:LAST_PRICE", "ETH/USDT") == "MARKET:LAST_PRICE:ETH_USDT"
+
+
+def test_parse_active_symbols_filters_invalid_entries() -> None:
+    raw = json.dumps(["BTC/USDT", "ETH/USDT", "", "BTC/USDT"])
+    assert parse_active_symbols(raw) == ["BTC/USDT", "ETH/USDT"]
 
 
 def test_heartbeat_age_seconds_parses_iso_timestamp() -> None:

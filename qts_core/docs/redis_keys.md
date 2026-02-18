@@ -12,8 +12,15 @@ Claves usadas por el ciclo en vivo, el OMS y el dashboard.
 - `METRICS:LATENCY:TICK_TO_DECISION_MS` — Float en string, latencia desde recepción del tick hasta decisión del supervisor (ms). **Productor:** trader. **Consumidor:** dashboard/alerting.
 - `METRICS:LATENCY:DECISION_TO_FILL_MS` — Float en string, latencia desde envío de orden hasta fill/no-fill (ms). **Productor:** trader. **Consumidor:** dashboard/alerting.
 - `METRICS:LATENCY:TICK_TO_FILL_MS` — Float en string, latencia extremo a extremo tick→fill/no-fill (ms). **Productor:** trader. **Consumidor:** dashboard/alerting.
-- `MARKET:LAST_PRICE` — Float en string, último precio del símbolo activo. **Productor:** trader. **Consumidor:** dashboard.
-- `MARKET:LAST_TICK` — JSON `{symbol, price, timestamp}` del último tick conocido. **Productor:** trader. **Consumidor:** dashboard.
+- `METRICS:LATENCY:TICK_TO_DECISION_MS:<SYMBOL>` — Latencia por símbolo (suffix normalizado, ej. `ETH_USDT`). **Productor:** trader. **Consumidor:** dashboard multi-activo.
+- `METRICS:LATENCY:DECISION_TO_FILL_MS:<SYMBOL>` — Latencia submit→fill por símbolo. **Productor:** trader. **Consumidor:** dashboard multi-activo.
+- `METRICS:LATENCY:TICK_TO_FILL_MS:<SYMBOL>` — Latencia end-to-end por símbolo. **Productor:** trader. **Consumidor:** dashboard multi-activo.
+- `MARKET:ACTIVE_SYMBOLS` — JSON array con símbolos activos (ej. `["BTC/USDT","ETH/USDT"]`). **Productor:** trader. **Consumidor:** dashboard.
+- `MARKET:LAST_PRICE` — Float en string, último precio del símbolo activo (canónico/backward-compatible). **Productor:** trader. **Consumidor:** dashboard.
+- `MARKET:LAST_PRICE:<SYMBOL>` — Float en string por símbolo. **Productor:** trader. **Consumidor:** dashboard multi-activo.
+- `MARKET:LAST_TICK` — JSON `{symbol, price, timestamp}` del último tick conocido (canónico/backward-compatible). **Productor:** trader. **Consumidor:** dashboard.
+- `MARKET:LAST_TICK:<SYMBOL>` — JSON del último tick por símbolo. **Productor:** trader. **Consumidor:** dashboard multi-activo.
+- `MARKET:OHLCV:<SYMBOL>` — OHLCV serializado por símbolo para chart multi-activo. **Productor:** trader. **Consumidor:** dashboard multi-activo.
 - `VIEW:ORDERS` — JSON array de órdenes visibles, p.ej. `[{"order_id": "...", "side": "BUY", "qty": 0.1, "price": 110.0, "status": "FILLED", "ts": "..."}]`. **Productor:** trader al registrar fills. **Consumidor:** dashboard (tabla de órdenes).
 - `VIEW:POSITIONS` — JSON array de posiciones, p.ej. `[{"instrument_id": "BTC/USDT", "quantity": 0.5}]`. **Productor:** trader. **Consumidor:** dashboard.
 - `oms:portfolio` — Modelo Pydantic `Portfolio` serializado. **Productor/Consumidor:** OMS.
