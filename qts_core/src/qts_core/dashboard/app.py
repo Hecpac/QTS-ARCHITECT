@@ -3,12 +3,17 @@ from __future__ import annotations
 import os
 import time
 
+import json
+
 import plotly.graph_objects as go
 import redis
 import streamlit as st
+import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 from qts_core.dashboard.utils import (
+    compute_orderbook_imbalance,
+    fetch_orderbook_with_fallback,
     fetch_rss_news,
     fetch_yahoo_chart_rows,
     heartbeat_age_seconds,
@@ -17,6 +22,7 @@ from qts_core.dashboard.utils import (
     safe_float,
     safe_json,
     symbol_scoped_key,
+    to_binance_symbol,
 )
 
 
@@ -227,6 +233,152 @@ def _load_market_news() -> list[dict[str, str]]:
     return fetch_rss_news(feeds, per_feed_limit=10, total_limit=30)
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def _load_orderbook(
+    symbol: str,
+    depth: int,
+) -> tuple[dict[str, list[dict[str, float]]], str]:
+    return fetch_orderbook_with_fallback(symbol, limit=depth)
+
+
+def _build_heatmap_figure(rows: list[dict[str, str | float]]) -> go.Figure:
+    if not rows:
+        return go.Figure()
+
+    labels = [str(row.get("symbol", "")) for row in rows]
+    values = [abs(safe_float(row.get("change_pct"))) + 1 for row in rows]
+    changes = [safe_float(row.get("change_pct")) for row in rows]
+    texts = [f"{label}<br>{change:+.2f}%" for label, change in zip(labels, changes, strict=False)]
+
+    figure = go.Figure(
+        go.Treemap(
+            labels=labels,
+            parents=["" for _ in labels],
+            values=values,
+            text=texts,
+            textinfo="text",
+            marker={
+                "colors": changes,
+                "colorscale": "RdYlGn",
+                "cmid": 0,
+                "line": {"width": 1, "color": "#1f1f1f"},
+                "showscale": True,
+                "colorbar": {"title": "Change %"},
+            },
+        )
+    )
+    figure.update_layout(
+        title="Heatmap · Change %",
+        template="plotly_dark",
+        height=280,
+        margin={"l": 0, "r": 0, "t": 35, "b": 0},
+    )
+    return figure
+
+
+def _plotly_interaction_config() -> dict[str, object]:
+    return {
+        "displaylogo": False,
+        "modeBarButtonsToAdd": [
+            "drawline",
+            "drawopenpath",
+            "drawrect",
+            "drawcircle",
+            "eraseshape",
+        ],
+        "scrollZoom": True,
+        "responsive": True,
+    }
+
+
+def _render_websocket_ticker(symbols: list[str]) -> None:
+    streams = [f"{to_binance_symbol(symbol).lower()}@trade" for symbol in symbols if symbol]
+    streams = streams[:8]
+    if not streams:
+        return
+
+    stream_param = "/".join(streams)
+    label_map = {to_binance_symbol(symbol).lower(): symbol for symbol in symbols}
+
+    payload = json.dumps({"stream": stream_param, "labels": label_map})
+    components.html(
+        f"""
+        <div style=\"padding:8px 12px;border:1px solid #2d2d2d;border-radius:8px;background:#111;margin:6px 0 10px 0;\">
+          <div style=\"font-size:12px;color:#9aa0a6;margin-bottom:6px;\">WebSocket ticks (Binance stream)</div>
+          <div id=\"ticker-wrap\" style=\"display:flex;gap:12px;flex-wrap:wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;\"></div>
+        </div>
+        <script>
+          const cfg = {payload};
+          const labels = cfg.labels || {{}};
+          const wrap = document.getElementById('ticker-wrap');
+          const format = (n) => Number(n).toLocaleString(undefined, {{maximumFractionDigits: 6}});
+
+          Object.values(labels).forEach((label) => {{
+            const node = document.createElement('span');
+            node.id = `tick-${{label.replace(/[^a-zA-Z0-9]/g,'_')}}`;
+            node.textContent = `${{label}} --`;
+            node.style.color = '#cfd8dc';
+            wrap.appendChild(node);
+          }});
+
+          const socket = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${{cfg.stream}}`);
+          socket.onmessage = (event) => {{
+            try {{
+              const parsed = JSON.parse(event.data);
+              const stream = String(parsed.stream || '');
+              const data = parsed.data || {{}};
+              const symbol = stream.split('@')[0] || '';
+              const label = labels[symbol] || symbol.toUpperCase();
+              const nodeId = `tick-${{label.replace(/[^a-zA-Z0-9]/g,'_')}}`;
+              const node = document.getElementById(nodeId);
+              if (!node) return;
+
+              const price = Number(data.p || data.c || 0);
+              const isBuyerMaker = Boolean(data.m);
+              node.textContent = `${{label}} ${{format(price)}}`;
+              node.style.color = isBuyerMaker ? '#ef5350' : '#26a69a';
+            }} catch (_) {{}}
+          }};
+          socket.onerror = () => {{
+            wrap.style.opacity = 0.6;
+          }};
+        </script>
+        """,
+        height=84,
+    )
+
+
+def _render_audio_alert(trigger: bool, token: str) -> None:
+    if not trigger:
+        return
+
+    components.html(
+        f"""
+        <script>
+          const token = {json.dumps(token)};
+          const storageKey = 'qts-audio-alert-token';
+          const previous = sessionStorage.getItem(storageKey);
+          if (previous !== token) {{
+            sessionStorage.setItem(storageKey, token);
+            try {{
+              const ctx = new (window.AudioContext || window.webkitAudioContext)();
+              const oscillator = ctx.createOscillator();
+              const gainNode = ctx.createGain();
+              oscillator.type = 'sine';
+              oscillator.frequency.value = 880;
+              gainNode.gain.value = 0.035;
+              oscillator.connect(gainNode);
+              gainNode.connect(ctx.destination);
+              oscillator.start();
+              oscillator.stop(ctx.currentTime + 0.25);
+            }} catch (_) {{}}
+          }}
+        </script>
+        """,
+        height=0,
+    )
+
+
 # --------------------------------------------------------------------
 # STYLES
 # --------------------------------------------------------------------
@@ -369,9 +521,21 @@ except Exception:
     last_heartbeat_raw = None
     last_alert_raw = None
 
+selected_change_pct = 0.0
+for row in asset_snapshot_rows:
+    if str(row.get("symbol")) == selected_symbol:
+        selected_change_pct = safe_float(row.get("change_pct"))
+        break
+
+last_alert_payload = safe_json(last_alert_raw, default={})
+if not isinstance(last_alert_payload, dict):
+    last_alert_payload = {}
+
+last_alert_level = str(last_alert_payload.get("level", "INFO")).upper()
+last_alert_event = str(last_alert_payload.get("event", ""))
+
 heartbeat_age = heartbeat_age_seconds(last_heartbeat_raw)
 heartbeat_stale_seconds = int(os.getenv("HEARTBEAT_STALE_SECONDS", "15"))
-
 
 # --------------------------------------------------------------------
 # METRIC ROW
@@ -386,6 +550,7 @@ if heartbeat_age is None:
 else:
     m5.metric("Heartbeat Age", f"{heartbeat_age:,.1f}s")
 
+_render_websocket_ticker(active_symbols)
 
 # --------------------------------------------------------------------
 # LATENCY ROW
@@ -401,6 +566,35 @@ elif heartbeat_age > heartbeat_stale_seconds:
     st.error(
         f"Heartbeat stale: {heartbeat_age:,.1f}s (> {heartbeat_stale_seconds}s)."
     )
+
+with st.expander("🔔 Alertas sonoras", expanded=False):
+    audio_enabled = st.checkbox("Activar audio", value=True)
+    audio_threshold_pct = st.slider(
+        "Umbral de variación % para beep",
+        min_value=0.2,
+        max_value=5.0,
+        value=1.0,
+        step=0.1,
+    )
+
+audio_trigger = False
+if audio_enabled:
+    stale_trigger = heartbeat_age is not None and heartbeat_age > heartbeat_stale_seconds
+    critical_trigger = last_alert_level in {"ERROR", "CRITICAL"}
+    move_trigger = abs(selected_change_pct) >= audio_threshold_pct
+    audio_trigger = stale_trigger or critical_trigger or move_trigger
+
+    if audio_trigger:
+        trigger_token = "|".join(
+            [
+                selected_symbol,
+                f"{selected_change_pct:.4f}",
+                last_alert_level,
+                last_alert_event,
+                str(last_heartbeat_raw),
+            ]
+        )
+        _render_audio_alert(True, trigger_token)
 
 if asset_snapshot_rows:
     st.subheader("Market Watch")
@@ -430,22 +624,60 @@ tab_chart, tab_multichart, tab_news, tab_pos, tab_alerts, tab_logs = st.tabs(
 )
 
 with tab_chart:
-    selected_rows = ohlcv_rows_by_symbol.get(selected_symbol, [])
-    if selected_rows:
-        tradingview_figure = _build_tradingview_style_figure(
-            selected_rows,
-            title=f"{selected_symbol} — TradingView Style",
-            height=760,
-        )
-        st.plotly_chart(tradingview_figure, use_container_width=True)
+    col_chart_main, col_chart_side = st.columns([3.4, 1.6])
 
-        with st.expander("Ver datos crudos (OHLCV) del activo seleccionado"):
-            st.dataframe(selected_rows[-10:], use_container_width=True)
-    else:
-        st.info(f"Esperando datos de velas (OHLCV) para {selected_symbol}...")
+    selected_rows = ohlcv_rows_by_symbol.get(selected_symbol, [])
+    with col_chart_main:
+        if selected_rows:
+            tradingview_figure = _build_tradingview_style_figure(
+                selected_rows,
+                title=f"{selected_symbol} — TradingView Style",
+                height=760,
+            )
+            st.plotly_chart(
+                tradingview_figure,
+                use_container_width=True,
+                config=_plotly_interaction_config(),
+            )
+
+            with st.expander("Ver datos crudos (OHLCV) del activo seleccionado"):
+                st.dataframe(selected_rows[-10:], use_container_width=True)
+        else:
+            st.info(f"Esperando datos de velas (OHLCV) para {selected_symbol}...")
+
+    with col_chart_side:
+        st.subheader("DOM / Orderbook")
+        dom_depth = st.select_slider("Depth", options=[5, 10, 20, 30], value=20)
+        orderbook, orderbook_source = _load_orderbook(selected_symbol, dom_depth)
+        imbalance = compute_orderbook_imbalance(orderbook)
+        st.metric("Book imbalance", f"{imbalance:+.3f}")
+
+        bid_rows = orderbook.get("bids", [])
+        ask_rows = orderbook.get("asks", [])
+
+        st.caption("Asks")
+        if ask_rows:
+            st.dataframe(ask_rows[:10], use_container_width=True, hide_index=True)
+        else:
+            st.caption("Sin asks")
+
+        st.caption("Bids")
+        if bid_rows:
+            st.dataframe(bid_rows[:10], use_container_width=True, hide_index=True)
+        else:
+            st.caption("Sin bids")
+
+        st.caption(f"Fuente DOM: {orderbook_source}")
 
 with tab_multichart:
     st.subheader("Panel multi-activo")
+
+    if asset_snapshot_rows:
+        st.plotly_chart(
+            _build_heatmap_figure(asset_snapshot_rows),
+            use_container_width=True,
+        )
+
     for symbol in active_symbols:
         symbol_rows = ohlcv_rows_by_symbol.get(symbol, [])
         if not symbol_rows:
@@ -459,6 +691,7 @@ with tab_multichart:
                 height=320,
             ),
             use_container_width=True,
+            config=_plotly_interaction_config(),
         )
 
     st.subheader("NASDAQ Composite (^IXIC)")
@@ -473,12 +706,13 @@ with tab_multichart:
             f"· last={nasdaq_last_close}"
         )
         st.plotly_chart(
-            _build_candlestick_figure(
+            _build_tradingview_style_figure(
                 nasdaq_rows,
-                title="NASDAQ Composite (^IXIC)",
-                height=420,
+                title="NASDAQ Composite (^IXIC) — TradingView Style",
+                height=680,
             ),
             use_container_width=True,
+            config=_plotly_interaction_config(),
         )
     else:
         st.warning("No se pudo cargar el gráfico de NASDAQ por ahora.")
@@ -528,11 +762,10 @@ with tab_pos:
 
 with tab_alerts:
     st.subheader("Last Alert")
-    last_alert = safe_json(last_alert_raw, default={})
-    if isinstance(last_alert, dict) and last_alert:
-        level = str(last_alert.get("level", "INFO")).upper()
-        event = str(last_alert.get("event", "UNKNOWN"))
-        message = str(last_alert.get("message", ""))
+    if last_alert_payload:
+        level = str(last_alert_payload.get("level", "INFO")).upper()
+        event = str(last_alert_payload.get("event", "UNKNOWN"))
+        message = str(last_alert_payload.get("message", ""))
         caption = f"[{level}] {event} — {message}"
 
         if level in {"CRITICAL", "ERROR"}:
@@ -542,7 +775,7 @@ with tab_alerts:
         else:
             st.info(caption)
 
-        st.json(last_alert)
+        st.json(last_alert_payload)
     else:
         st.caption("Sin alertas recientes.")
 

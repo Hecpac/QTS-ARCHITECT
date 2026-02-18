@@ -4,14 +4,18 @@ import json
 from datetime import datetime, timezone
 
 from qts_core.dashboard.utils import (
+    compute_orderbook_imbalance,
     heartbeat_age_seconds,
     load_alert_events,
     parse_active_symbols,
+    parse_binance_orderbook_payload,
+    parse_kraken_orderbook_payload,
     parse_rss_news_items,
     parse_yahoo_chart_payload,
     safe_float,
     symbol_key_suffix,
     symbol_scoped_key,
+    to_binance_symbol,
 )
 
 
@@ -41,6 +45,37 @@ def test_safe_float_returns_default_on_invalid_input() -> None:
 def test_symbol_key_helpers() -> None:
     assert symbol_key_suffix("BTC/USDT") == "BTC_USDT"
     assert symbol_scoped_key("MARKET:LAST_PRICE", "ETH/USDT") == "MARKET:LAST_PRICE:ETH_USDT"
+    assert to_binance_symbol("SOL/USDT") == "SOLUSDT"
+
+
+def test_parse_binance_orderbook_payload_and_imbalance() -> None:
+    payload = {
+        "bids": [["100.0", "2.5"], ["99.5", "1.0"]],
+        "asks": [["100.5", "1.0"], ["101.0", "0.5"]],
+    }
+
+    normalized = parse_binance_orderbook_payload(payload, limit=5)
+    assert normalized["bids"][0]["price"] == 100.0
+    assert normalized["asks"][1]["size"] == 0.5
+
+    imbalance = compute_orderbook_imbalance(normalized)
+    assert imbalance > 0
+
+
+def test_parse_kraken_orderbook_payload() -> None:
+    payload = {
+        "error": [],
+        "result": {
+            "BTCUSDT": {
+                "asks": [["101.0", "1.2", 1700], ["101.5", "0.8", 1701]],
+                "bids": [["100.5", "1.5", 1700], ["100.0", "0.9", 1701]],
+            }
+        },
+    }
+
+    normalized = parse_kraken_orderbook_payload(payload, limit=5)
+    assert normalized["asks"][0]["price"] == 101.0
+    assert normalized["bids"][1]["size"] == 0.9
 
 
 def test_parse_active_symbols_filters_invalid_entries() -> None:

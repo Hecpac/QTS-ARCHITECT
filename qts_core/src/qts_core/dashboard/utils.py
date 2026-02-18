@@ -57,6 +57,183 @@ def parse_active_symbols(raw: str | None) -> list[str]:
     return symbols
 
 
+def to_binance_symbol(symbol: str) -> str:
+    """Convert a slash symbol into Binance symbol format."""
+    return symbol.upper().replace("/", "").replace(":", "")
+
+
+def parse_binance_orderbook_payload(
+    payload: dict[str, Any],
+    *,
+    limit: int = 20,
+) -> dict[str, list[dict[str, float]]]:
+    """Normalize Binance orderbook payload into float bid/ask levels."""
+    bids_payload = payload.get("bids") if isinstance(payload, dict) else None
+    asks_payload = payload.get("asks") if isinstance(payload, dict) else None
+
+    if not isinstance(bids_payload, list) or not isinstance(asks_payload, list):
+        return {"bids": [], "asks": []}
+
+    def _normalize_levels(levels: list[Any]) -> list[dict[str, float]]:
+        normalized: list[dict[str, float]] = []
+        for level in levels[: max(0, limit)]:
+            if not isinstance(level, list) or len(level) < 2:
+                continue
+            try:
+                price = float(level[0])
+                size = float(level[1])
+            except (TypeError, ValueError):
+                continue
+            if price <= 0 or size <= 0:
+                continue
+            normalized.append({"price": price, "size": size})
+        return normalized
+
+    return {
+        "bids": _normalize_levels(bids_payload),
+        "asks": _normalize_levels(asks_payload),
+    }
+
+
+def parse_kraken_orderbook_payload(
+    payload: dict[str, Any],
+    *,
+    limit: int = 20,
+) -> dict[str, list[dict[str, float]]]:
+    """Normalize Kraken depth payload into float bid/ask levels."""
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict) or not result:
+        return {"bids": [], "asks": []}
+
+    first_book = next(iter(result.values()), None)
+    if not isinstance(first_book, dict):
+        return {"bids": [], "asks": []}
+
+    bids_payload = first_book.get("bids")
+    asks_payload = first_book.get("asks")
+    if not isinstance(bids_payload, list) or not isinstance(asks_payload, list):
+        return {"bids": [], "asks": []}
+
+    def _normalize_levels(levels: list[Any]) -> list[dict[str, float]]:
+        normalized: list[dict[str, float]] = []
+        for level in levels[: max(0, limit)]:
+            if not isinstance(level, list) or len(level) < 2:
+                continue
+            try:
+                price = float(level[0])
+                size = float(level[1])
+            except (TypeError, ValueError):
+                continue
+            if price <= 0 or size <= 0:
+                continue
+            normalized.append({"price": price, "size": size})
+        return normalized
+
+    return {
+        "bids": _normalize_levels(bids_payload),
+        "asks": _normalize_levels(asks_payload),
+    }
+
+
+def fetch_binance_orderbook(
+    symbol: str,
+    *,
+    limit: int = 20,
+    timeout_seconds: float = 4.0,
+) -> dict[str, list[dict[str, float]]]:
+    """Fetch top-of-book depth from Binance public REST API."""
+    binance_symbol = to_binance_symbol(symbol)
+    url = (
+        "https://api.binance.com/api/v3/depth"
+        f"?symbol={quote(binance_symbol)}&limit={max(5, min(limit, 100))}"
+    )
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return {"bids": [], "asks": []}
+
+    if not isinstance(payload, dict):
+        return {"bids": [], "asks": []}
+
+    return parse_binance_orderbook_payload(payload, limit=limit)
+
+
+def fetch_kraken_orderbook(
+    symbol: str,
+    *,
+    limit: int = 20,
+    timeout_seconds: float = 4.0,
+) -> dict[str, list[dict[str, float]]]:
+    """Fetch top-of-book depth from Kraken public REST API."""
+    kraken_pair = to_binance_symbol(symbol)
+    url = (
+        "https://api.kraken.com/0/public/Depth"
+        f"?pair={quote(kraken_pair)}&count={max(5, min(limit, 100))}"
+    )
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return {"bids": [], "asks": []}
+
+    if not isinstance(payload, dict):
+        return {"bids": [], "asks": []}
+
+    return parse_kraken_orderbook_payload(payload, limit=limit)
+
+
+def fetch_orderbook_with_fallback(
+    symbol: str,
+    *,
+    limit: int = 20,
+    timeout_seconds: float = 4.0,
+) -> tuple[dict[str, list[dict[str, float]]], str]:
+    """Fetch orderbook using Binance first, then Kraken fallback."""
+    from_binance = fetch_binance_orderbook(symbol, limit=limit, timeout_seconds=timeout_seconds)
+    if from_binance.get("bids") and from_binance.get("asks"):
+        return from_binance, "Binance"
+
+    from_kraken = fetch_kraken_orderbook(symbol, limit=limit, timeout_seconds=timeout_seconds)
+    if from_kraken.get("bids") and from_kraken.get("asks"):
+        return from_kraken, "Kraken"
+
+    return {"bids": [], "asks": []}, "N/A"
+
+
+def compute_orderbook_imbalance(orderbook: dict[str, list[dict[str, float]]]) -> float:
+    """Compute bid-ask imbalance in [-1, 1] from top levels."""
+    bids = orderbook.get("bids", [])
+    asks = orderbook.get("asks", [])
+
+    bid_size = sum(level.get("size", 0.0) for level in bids)
+    ask_size = sum(level.get("size", 0.0) for level in asks)
+
+    denom = bid_size + ask_size
+    if denom <= 0:
+        return 0.0
+
+    return (bid_size - ask_size) / denom
+
+
 def parse_yahoo_chart_payload(payload: dict[str, Any]) -> list[dict[str, float | str]]:
     """Parse Yahoo Finance chart payload into normalized OHLCV rows."""
     chart = payload.get("chart") if isinstance(payload, dict) else None
