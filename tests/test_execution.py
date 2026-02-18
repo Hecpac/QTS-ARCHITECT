@@ -637,6 +637,49 @@ class TestOrderManagementSystem:
 
         assert oms.portfolio.blocked_cash == pytest.approx(10_000.0)
 
+    @pytest.mark.asyncio
+    async def test_reconcile_with_exchange_applies_missing_fill(self) -> None:
+        """Exchange reconciliation should settle missing remote fills."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(store, initial_cash=100_000.0, risk_fraction=0.1)
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.LONG,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test exchange reconcile",
+        )
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is not None
+
+        order = oms.get_order(request.oms_order_id)
+        assert order is not None
+        order.external_id = "ex-order-1"
+        store.save(f"{oms.ORDERS_KEY_PREFIX}{order.id}", order)
+
+        exchange = _FakeExchangeForReconcile(
+            {
+                "ex-order-1": {
+                    "id": "ex-order-1",
+                    "status": "closed",
+                    "filled": 0.2,
+                    "average": 50_000.0,
+                }
+            }
+        )
+
+        await oms.reconcile_with_exchange(exchange)
+
+        reconciled_order = oms.get_order(request.oms_order_id)
+        assert reconciled_order is not None
+        assert reconciled_order.status == OrderStatus.FILLED
+        assert reconciled_order.filled_quantity == pytest.approx(0.2)
+
+        assert oms.portfolio.blocked_cash == pytest.approx(0.0)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(0.2)
+
     def test_revert_allocation(self) -> None:
         """Test reverting allocation restores portfolio state."""
         store = MemoryStore()
@@ -899,6 +942,16 @@ class _FakeExchangeForParse:
 
     async def fetch_order(self, order_id: str, symbol: str) -> dict:  # noqa: ARG002
         return self.fetched_order
+
+
+class _FakeExchangeForReconcile:
+    """Minimal async fake exchange for OMS exchange reconciliation tests."""
+
+    def __init__(self, orders: dict[str, dict]) -> None:
+        self.orders = orders
+
+    async def fetch_order(self, order_id: str, symbol: str) -> dict:  # noqa: ARG002
+        return self.orders[order_id]
 
 
 class TestCCXTGatewayPayload:

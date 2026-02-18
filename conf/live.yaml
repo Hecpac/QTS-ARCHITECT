@@ -31,6 +31,7 @@ loop:
   tick_interval: 10.0
   heartbeat_key: "SYSTEM:HEARTBEAT"
   execution_timeout: 20.0
+  max_session_drawdown: 0.10
 
 execution_guardrails:
   enabled: true

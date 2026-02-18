@@ -255,14 +255,15 @@ def test_guardrails_reject_high_estimated_slippage():
     assert guarded is None
 
 
-def test_reconcile_helper_runs_after_ambiguous_submission():
+@pytest.mark.asyncio
+async def test_reconcile_helper_runs_after_ambiguous_submission() -> None:
     trader = _build_live_trader()
 
     # Simulate stale blocked cash with no open orders; reconcile should clear it.
     trader.oms.portfolio.blocked_cash = 500.0
     trader.store.save(trader.oms.PORTFOLIO_KEY, trader.oms.portfolio)
 
-    trader._reconcile_after_ambiguous_submission(
+    await trader._reconcile_after_ambiguous_submission(
         reason="unit_test_timeout",
         order_id="unit-test-order",
     )
@@ -294,6 +295,19 @@ def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() ->
 
     # Gross notional = 1*100 + 2*50 = 200
     assert exposure == pytest.approx(200.0 / total_value)
+
+
+def test_session_drawdown_limit_detection() -> None:
+    trader = _build_live_trader()
+    trader.max_session_drawdown = 0.10
+
+    # Establish peak.
+    assert trader._compute_session_drawdown_fraction(100_000.0) == pytest.approx(0.0)
+
+    # 15% drawdown should breach a 10% limit.
+    drawdown = trader._compute_session_drawdown_fraction(85_000.0)
+    assert drawdown == pytest.approx(0.15)
+    assert trader._drawdown_limit_breached(85_000.0) is True
 
 
 @pytest.mark.asyncio

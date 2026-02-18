@@ -172,6 +172,13 @@ class LiveTrader:
         # Last known marks by instrument for multi-instrument exposure accounting.
         self._instrument_marks: dict[InstrumentId, float] = {}
 
+        # Optional session drawdown breaker (0 disables).
+        self.max_session_drawdown: float = max(
+            0.0,
+            float(cfg.loop.get("max_session_drawdown", 0.0)),
+        )
+        self._session_peak_value: float | None = None
+
     async def _fetch_live_data(self) -> MarketData:
         """Fetch live market data.
 
@@ -357,14 +364,60 @@ class LiveTrader:
 
         return (total_value - self._daily_anchor_value) / self._daily_anchor_value
 
-    def _reconcile_after_ambiguous_submission(
+    def _compute_session_drawdown_fraction(self, total_value: float) -> float:
+        if total_value <= 0:
+            return 0.0
+
+        if self._session_peak_value is None or total_value > self._session_peak_value:
+            self._session_peak_value = total_value
+            return 0.0
+
+        if self._session_peak_value <= 0:
+            return 0.0
+
+        drawdown = (self._session_peak_value - total_value) / self._session_peak_value
+        return max(0.0, drawdown)
+
+    def _drawdown_limit_breached(self, total_value: float) -> bool:
+        if self.max_session_drawdown <= 0:
+            return False
+        return self._compute_session_drawdown_fraction(total_value) >= self.max_session_drawdown
+
+    async def _trigger_emergency_halt(
+        self,
+        *,
+        reason: str,
+        total_value: float | None = None,
+    ) -> None:
+        try:
+            self.store.set("SYSTEM:HALT", "true")
+        except Exception as exc:
+            log.warning("Failed to persist SYSTEM:HALT flag", error=str(exc))
+
+        log.critical(
+            "Emergency halt triggered",
+            reason=reason,
+            total_value=total_value,
+            max_session_drawdown=self.max_session_drawdown,
+        )
+
+        await self._liquidate_open_positions()
+        await self.ems.stop()
+        self.running = False
+
+    async def _reconcile_after_ambiguous_submission(
         self,
         *,
         reason: str,
         order_id: str,
     ) -> None:
         try:
-            self.oms.reconcile()
+            exchange = getattr(self.ems, "exchange", None)
+            if exchange is not None:
+                await self.oms.reconcile_with_exchange(exchange)
+            else:
+                self.oms.reconcile()
+
             log.warning(
                 "OMS reconciliation executed after ambiguous submission",
                 reason=reason,
@@ -456,7 +509,7 @@ class LiveTrader:
                     order_id=order_request.oms_order_id,
                     timeout_seconds=self.execution_timeout,
                 )
-                self._reconcile_after_ambiguous_submission(
+                await self._reconcile_after_ambiguous_submission(
                     reason="halt_liquidation_timeout",
                     order_id=order_request.oms_order_id,
                 )
@@ -485,6 +538,7 @@ class LiveTrader:
                     fill_qty=fill_report.quantity,
                     fee=fill_report.fee,
                     exchange_trade_id=fill_report.exchange_order_id,
+                    exchange_order_id=fill_report.exchange_order_id,
                 )
             except Exception as exc:
                 log.error(
@@ -492,7 +546,7 @@ class LiveTrader:
                     order_id=order_request.oms_order_id,
                     error=str(exc),
                 )
-                self._reconcile_after_ambiguous_submission(
+                await self._reconcile_after_ambiguous_submission(
                     reason="halt_liquidation_confirm_failed",
                     order_id=order_request.oms_order_id,
                 )
@@ -568,7 +622,12 @@ class LiveTrader:
             await self.ems.start()
 
             try:
-                self.oms.reconcile()
+                exchange = getattr(self.ems, "exchange", None)
+                if exchange is not None:
+                    await self.oms.reconcile_with_exchange(exchange)
+                else:
+                    self.oms.reconcile()
+
                 log.info("Startup OMS reconciliation completed")
             except Exception as exc:
                 log.error(
@@ -582,9 +641,7 @@ class LiveTrader:
                 self._publish_heartbeat()
 
                 if self._halt_requested():
-                    log.critical("SYSTEM HALT DETECTED. Starting emergency liquidation.")
-                    await self._liquidate_open_positions()
-                    await self.ems.stop()
+                    await self._trigger_emergency_halt(reason="external_halt_flag")
                     return
 
                 try:
@@ -613,6 +670,17 @@ class LiveTrader:
                     market_data.close,
                     total_value,
                 )
+
+                session_drawdown = self._compute_session_drawdown_fraction(total_value)
+                if (
+                    self.max_session_drawdown > 0
+                    and session_drawdown >= self.max_session_drawdown
+                ):
+                    await self._trigger_emergency_halt(
+                        reason="session_drawdown_limit_breached",
+                        total_value=total_value,
+                    )
+                    return
 
                 try:
                     decision = await self.supervisor.run(
@@ -668,7 +736,7 @@ class LiveTrader:
                         order_id=order_request.oms_order_id,
                         timeout_seconds=self.execution_timeout,
                     )
-                    self._reconcile_after_ambiguous_submission(
+                    await self._reconcile_after_ambiguous_submission(
                         reason="submit_timeout",
                         order_id=order_request.oms_order_id,
                     )
@@ -690,6 +758,7 @@ class LiveTrader:
                             fill_qty=fill_report.quantity,
                             fee=fill_report.fee,
                             exchange_trade_id=fill_report.exchange_order_id,
+                            exchange_order_id=fill_report.exchange_order_id,
                         )
                     except Exception as exc:
                         log.error(
@@ -697,7 +766,7 @@ class LiveTrader:
                             error=str(exc),
                             order_id=order_request.oms_order_id,
                         )
-                        self._reconcile_after_ambiguous_submission(
+                        await self._reconcile_after_ambiguous_submission(
                             reason="confirm_failed",
                             order_id=order_request.oms_order_id,
                         )

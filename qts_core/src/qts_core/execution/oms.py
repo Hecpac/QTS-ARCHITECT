@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 from pydantic import (
@@ -688,6 +688,7 @@ class OrderManagementSystem:
         fill_qty: float,
         fee: float = 0.0,
         exchange_trade_id: str | None = None,
+        exchange_order_id: str | None = None,
     ) -> None:
         """Confirm order execution and settle the trade.
 
@@ -700,6 +701,7 @@ class OrderManagementSystem:
             fill_qty: Filled quantity.
             fee: Transaction fee (deducted from proceeds/added to cost).
             exchange_trade_id: Optional exchange trade ID for idempotency.
+            exchange_order_id: Optional exchange order identifier for reconciliation.
 
         Raises:
             OrderNotFoundError: If order not found.
@@ -734,6 +736,9 @@ class OrderManagementSystem:
                 exchange_trade_id=exchange_trade_id,
             )
             return
+
+        if exchange_order_id and order.external_id is None:
+            order.external_id = exchange_order_id
 
         remaining_before = order.remaining_quantity
         if remaining_before <= MIN_QUANTITY:
@@ -1021,6 +1026,93 @@ class OrderManagementSystem:
             if order and not order.is_terminal:
                 open_orders.append(order)
         return open_orders
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        """Best-effort float conversion for exchange payload fields."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def reconcile_with_exchange(
+        self,
+        exchange: Any,
+    ) -> None:
+        """Reconcile open orders against exchange state.
+
+        This method complements local reconciliation by querying exchange order
+        status for persisted non-terminal orders with known external IDs.
+        """
+        log.info("Exchange reconciliation started")
+
+        open_orders = self.get_open_orders()
+        terminal_statuses = {"closed", "filled", "canceled", "cancelled", "rejected", "expired"}
+
+        for order in open_orders:
+            if order.is_terminal or not order.external_id:
+                continue
+
+            symbol = str(order.instrument_id)
+            try:
+                remote_order = await exchange.fetch_order(order.external_id, symbol)
+            except Exception as exc:
+                log.warning(
+                    "Exchange order fetch failed during reconciliation",
+                    order_id=order.id,
+                    external_id=order.external_id,
+                    instrument=symbol,
+                    error=str(exc),
+                )
+                continue
+
+            if not isinstance(remote_order, dict):
+                continue
+
+            remote_status = str(remote_order.get("status") or "").lower()
+            remote_filled = self._coerce_float(remote_order.get("filled")) or 0.0
+            local_filled = order.filled_quantity
+
+            # Apply missing fills using cumulative fill delta.
+            if remote_filled > local_filled + MIN_QUANTITY:
+                delta_fill = remote_filled - local_filled
+                price_candidate = remote_order.get("average") or remote_order.get("price")
+                fill_price = self._coerce_float(price_candidate)
+                if fill_price is not None and fill_price > 0:
+                    synthetic_fill_id = f"{order.external_id}:{remote_filled:.12f}"
+                    self.confirm_execution(
+                        oms_order_id=order.id,
+                        fill_price=fill_price,
+                        fill_qty=delta_fill,
+                        fee=0.0,
+                        exchange_trade_id=synthetic_fill_id,
+                        exchange_order_id=order.external_id,
+                    )
+                else:
+                    log.warning(
+                        "Skipping remote fill application due to invalid price",
+                        order_id=order.id,
+                        external_id=order.external_id,
+                        remote_price=price_candidate,
+                        remote_filled=remote_filled,
+                    )
+
+            # If exchange reports order terminal, finalize local state.
+            if remote_status in terminal_statuses:
+                refreshed = self.get_order(order.id)
+                if refreshed is None or refreshed.is_terminal:
+                    continue
+
+                if remote_status in {"closed", "filled"} and refreshed.remaining_quantity <= MIN_QUANTITY:
+                    refreshed.status = OrderStatus.FILLED
+                    refreshed.updated_at = datetime.now(timezone.utc)
+                    self._persist_state(refreshed)
+                else:
+                    self.cancel_order(refreshed.id)
+
+        # Always rebuild blocked reservations from resulting local open orders.
+        self.reconcile()
+        log.info("Exchange reconciliation completed")
 
     def reconcile(self) -> None:
         """Reconcile blocked reservations from persisted open orders.
