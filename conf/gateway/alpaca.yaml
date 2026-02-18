@@ -1,0 +1,4 @@
+_target_: qts_core.execution.ems.AlpacaGateway
+api_key: "${oc.env:ALPACA_API_KEY}"
+secret: "${oc.env:ALPACA_SECRET_KEY}"
+paper_trading: true

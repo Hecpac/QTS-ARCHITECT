@@ -56,6 +56,7 @@ redis = "^5.0.0"               # State persistence and pub/sub
 # Exchange Connectivity
 ccxt = "^4.0.0"                # Unified crypto exchange API
 tenacity = "^8.0.0"            # Retry logic with exponential backoff
+alpaca-py = "^0.32.0"          # Alpaca Markets API (Stocks/Crypto)
 
 # Machine Learning
 hmmlearn = "^0.3.0"            # Hidden Markov Models for regime detection

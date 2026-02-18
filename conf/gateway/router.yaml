@@ -1,0 +1,21 @@
+_target_: qts_core.execution.ems.RouterGateway
+gateways:
+  crypto:
+    _target_: qts_core.execution.ems.CCXTGateway
+    exchange_name: "okx"
+    sandbox: false
+    paper_trading: true
+    account_mode: "spot"
+  stocks:
+    _target_: qts_core.execution.ems.AlpacaGateway
+    api_key: "${oc.env:ALPACA_API_KEY}"
+    secret: "${oc.env:ALPACA_SECRET_KEY}"
+    paper_trading: true
+routes:
+  "BTC/": crypto
+  "ETH/": crypto
+  "SOL/": crypto
+  "XRP/": crypto
+  # Default fallback for everything else (Stocks)
+  "*": stocks
+default_gateway: stocks
