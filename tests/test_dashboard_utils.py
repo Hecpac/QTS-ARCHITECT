@@ -7,6 +7,7 @@ from qts_core.dashboard.utils import (
     heartbeat_age_seconds,
     load_alert_events,
     parse_active_symbols,
+    parse_rss_news_items,
     parse_yahoo_chart_payload,
     safe_float,
     symbol_key_suffix,
@@ -106,3 +107,30 @@ def test_parse_yahoo_chart_payload_returns_normalized_rows() -> None:
     assert rows[0]["open"] == 100.0
     assert rows[1]["close"] == 102.2
     assert "timestamp" in rows[0]
+
+
+def test_parse_rss_news_items_parses_and_sorts() -> None:
+    payload = """<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<rss version=\"2.0\">
+  <channel>
+    <item>
+      <title>Older</title>
+      <link>https://example.com/older</link>
+      <pubDate>Tue, 17 Feb 2026 17:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Newer</title>
+      <link>https://example.com/newer</link>
+      <pubDate>Tue, 17 Feb 2026 18:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+    items = parse_rss_news_items(payload, source="TestFeed", limit=10)
+
+    assert len(items) == 2
+    assert items[0]["title"] == "Newer"
+    assert items[0]["source"] == "TestFeed"
+    assert items[1]["title"] == "Older"
+    assert items[0]["published_ts"] >= items[1]["published_ts"]

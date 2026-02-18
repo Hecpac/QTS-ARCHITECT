@@ -6,8 +6,10 @@ import time
 import plotly.graph_objects as go
 import redis
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from qts_core.dashboard.utils import (
+    fetch_rss_news,
     fetch_yahoo_chart_rows,
     heartbeat_age_seconds,
     load_alert_events,
@@ -38,6 +40,45 @@ redis_client = redis.Redis(
 )
 
 
+def _compute_ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    if period <= 1:
+        return values.copy()
+
+    multiplier = 2 / (period + 1)
+    ema = [values[0]]
+    for value in values[1:]:
+        ema.append((value - ema[-1]) * multiplier + ema[-1])
+    return ema
+
+
+def _compute_rsi(values: list[float], period: int = 14) -> list[float | None]:
+    if len(values) < 2:
+        return [None for _ in values]
+
+    deltas = [values[index] - values[index - 1] for index in range(1, len(values))]
+    gains = [max(delta, 0.0) for delta in deltas]
+    losses = [abs(min(delta, 0.0)) for delta in deltas]
+
+    avg_gain = sum(gains[:period]) / period if len(gains) >= period else (sum(gains) / len(gains))
+    avg_loss = sum(losses[:period]) / period if len(losses) >= period else (sum(losses) / len(losses))
+
+    rsi: list[float | None] = [None]
+    for index in range(len(deltas)):
+        if index >= period:
+            avg_gain = ((avg_gain * (period - 1)) + gains[index]) / period
+            avg_loss = ((avg_loss * (period - 1)) + losses[index]) / period
+
+        if avg_loss == 0:
+            rsi.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            rsi.append(100 - (100 / (1 + rs)))
+
+    return rsi
+
+
 def _build_candlestick_figure(
     rows: list[dict[str, float | str]],
     *,
@@ -66,9 +107,124 @@ def _build_candlestick_figure(
     return figure
 
 
+def _build_tradingview_style_figure(
+    rows: list[dict[str, float | str]],
+    *,
+    title: str,
+    height: int = 720,
+) -> go.Figure:
+    timestamps = [row.get("timestamp") for row in rows]
+    opens = [safe_float(row.get("open")) for row in rows]
+    highs = [safe_float(row.get("high")) for row in rows]
+    lows = [safe_float(row.get("low")) for row in rows]
+    closes = [safe_float(row.get("close")) for row in rows]
+    volumes = [safe_float(row.get("volume")) for row in rows]
+
+    ema_20 = _compute_ema(closes, 20)
+    ema_50 = _compute_ema(closes, 50)
+    rsi_14 = _compute_rsi(closes, 14)
+    candle_colors = ["#00c087" if close >= open_ else "#ff4976" for open_, close in zip(opens, closes, strict=False)]
+
+    figure = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.62, 0.22, 0.16],
+        subplot_titles=("Price", "Volume", "RSI (14)"),
+    )
+
+    figure.add_trace(
+        go.Candlestick(
+            x=timestamps,
+            open=opens,
+            high=highs,
+            low=lows,
+            close=closes,
+            name="Candles",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=ema_20,
+            mode="lines",
+            line={"color": "#f5b700", "width": 1.5},
+            name="EMA 20",
+        ),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=ema_50,
+            mode="lines",
+            line={"color": "#7c4dff", "width": 1.5},
+            name="EMA 50",
+        ),
+        row=1,
+        col=1,
+    )
+
+    figure.add_trace(
+        go.Bar(
+            x=timestamps,
+            y=volumes,
+            marker_color=candle_colors,
+            name="Volume",
+            opacity=0.65,
+        ),
+        row=2,
+        col=1,
+    )
+
+    figure.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=rsi_14,
+            mode="lines",
+            line={"color": "#29b6f6", "width": 1.4},
+            name="RSI 14",
+        ),
+        row=3,
+        col=1,
+    )
+
+    figure.add_hline(y=70, row=3, col=1, line_width=1, line_dash="dash", line_color="#ff7043")
+    figure.add_hline(y=30, row=3, col=1, line_width=1, line_dash="dash", line_color="#66bb6a")
+
+    figure.update_layout(
+        title=title,
+        height=height,
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        margin={"l": 0, "r": 0, "t": 40, "b": 0},
+        hovermode="x unified",
+        legend={"orientation": "h", "y": 1.02, "x": 0.0},
+    )
+    figure.update_yaxes(fixedrange=False)
+    figure.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
+
+    return figure
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_nasdaq_rows(interval: str, range_: str) -> list[dict[str, float | str]]:
     return fetch_yahoo_chart_rows("^IXIC", interval=interval, range_=range_)
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def _load_market_news() -> list[dict[str, str]]:
+    feeds = [
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+        ("Nasdaq", "https://www.nasdaq.com/feed/rssoutbound?category=Markets"),
+        ("Investing", "https://www.investing.com/rss/news_25.rss"),
+    ]
+    return fetch_rss_news(feeds, per_feed_limit=10, total_limit=30)
 
 
 # --------------------------------------------------------------------
@@ -170,12 +326,6 @@ try:
             continue
 
         parsed_price = safe_float(scoped_price)
-        asset_snapshot_rows.append(
-            {
-                "symbol": symbol,
-                "last_price": parsed_price,
-            }
-        )
 
         raw_symbol_ohlcv = redis_client.get(symbol_scoped_key("MARKET:OHLCV", symbol))
         if raw_symbol_ohlcv is None and symbol == selected_symbol:
@@ -184,6 +334,20 @@ try:
         symbol_rows = safe_json(raw_symbol_ohlcv, default=[])
         if isinstance(symbol_rows, list) and symbol_rows:
             ohlcv_rows_by_symbol[symbol] = symbol_rows
+
+        pct_change = 0.0
+        if isinstance(symbol_rows, list) and len(symbol_rows) >= 2:
+            prev_close = safe_float(symbol_rows[-2].get("close"))
+            if abs(prev_close) > 1e-12:
+                pct_change = ((parsed_price - prev_close) / prev_close) * 100
+
+        asset_snapshot_rows.append(
+            {
+                "symbol": symbol,
+                "last_price": parsed_price,
+                "change_pct": pct_change,
+            }
+        )
 
     last_heartbeat_raw = redis_client.get("SYSTEM:HEARTBEAT")
     last_alert_raw = redis_client.get("ALERTS:LAST")
@@ -240,30 +404,48 @@ elif heartbeat_age > heartbeat_stale_seconds:
 
 if asset_snapshot_rows:
     st.subheader("Market Watch")
-    st.dataframe(asset_snapshot_rows, use_container_width=True)
+    st.dataframe(
+        asset_snapshot_rows,
+        use_container_width=True,
+        column_config={
+            "symbol": st.column_config.TextColumn("Symbol"),
+            "last_price": st.column_config.NumberColumn("Last", format="%.6f"),
+            "change_pct": st.column_config.NumberColumn("Change %", format="%.2f%%"),
+        },
+        hide_index=True,
+    )
 
 # --------------------------------------------------------------------
 # TABS
 # --------------------------------------------------------------------
-tab_chart, tab_pos, tab_alerts, tab_logs = st.tabs(
-    ["📈 Market Chart", "💼 Portfolio", "🚨 Alerts", "🧠 System Brain"]
+tab_chart, tab_multichart, tab_news, tab_pos, tab_alerts, tab_logs = st.tabs(
+    [
+        "📈 TradingView",
+        "🧩 Multi-Chart",
+        "📰 News Live",
+        "💼 Portfolio",
+        "🚨 Alerts",
+        "🧠 System Brain",
+    ]
 )
 
 with tab_chart:
     selected_rows = ohlcv_rows_by_symbol.get(selected_symbol, [])
     if selected_rows:
-        selected_figure = _build_candlestick_figure(
+        tradingview_figure = _build_tradingview_style_figure(
             selected_rows,
-            title=f"{selected_symbol} - Live Action",
-            height=450,
+            title=f"{selected_symbol} — TradingView Style",
+            height=760,
         )
-        st.plotly_chart(selected_figure, use_container_width=True)
+        st.plotly_chart(tradingview_figure, use_container_width=True)
+
         with st.expander("Ver datos crudos (OHLCV) del activo seleccionado"):
-            st.dataframe(selected_rows[-5:])
+            st.dataframe(selected_rows[-10:], use_container_width=True)
     else:
         st.info(f"Esperando datos de velas (OHLCV) para {selected_symbol}...")
 
-    st.subheader("Charts por activo")
+with tab_multichart:
+    st.subheader("Panel multi-activo")
     for symbol in active_symbols:
         symbol_rows = ohlcv_rows_by_symbol.get(symbol, [])
         if not symbol_rows:
@@ -300,6 +482,27 @@ with tab_chart:
         )
     else:
         st.warning("No se pudo cargar el gráfico de NASDAQ por ahora.")
+
+with tab_news:
+    st.subheader("Noticias de mercado en tiempo real")
+    st.caption("Actualiza automáticamente (cache ~45s por feed RSS).")
+
+    news_items = _load_market_news()
+    if not news_items:
+        st.warning("No se pudieron cargar noticias por ahora.")
+    else:
+        for item in news_items:
+            title = item.get("title", "(sin título)")
+            source = item.get("source", "unknown")
+            published = item.get("published", "")
+            link = item.get("link", "")
+
+            st.markdown(f"**{source}** · {published}")
+            if link:
+                st.markdown(f"[{title}]({link})")
+            else:
+                st.markdown(title)
+            st.divider()
 
 with tab_pos:
     col_p, col_o = st.columns(2)

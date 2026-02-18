@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -157,6 +159,109 @@ def fetch_yahoo_chart_rows(
         return []
 
     return parse_yahoo_chart_payload(payload)
+
+
+def _parse_news_datetime(raw_value: str | None) -> datetime:
+    if not raw_value:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+    try:
+        parsed = parsedate_to_datetime(raw_value)
+    except Exception:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_rss_news_items(
+    xml_payload: str,
+    *,
+    source: str,
+    limit: int = 15,
+) -> list[dict[str, str]]:
+    """Parse RSS XML payload into normalized news items."""
+    try:
+        root = ET.fromstring(xml_payload)
+    except ET.ParseError:
+        return []
+
+    items: list[dict[str, str]] = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date_raw = (
+            item.findtext("pubDate")
+            or item.findtext("{http://purl.org/dc/elements/1.1/}date")
+            or ""
+        ).strip()
+
+        if not title or not link:
+            continue
+
+        published_dt = _parse_news_datetime(pub_date_raw)
+        items.append(
+            {
+                "source": source,
+                "title": title,
+                "link": link,
+                "published": pub_date_raw,
+                "published_ts": published_dt.isoformat(),
+            }
+        )
+
+    items.sort(key=lambda row: row["published_ts"], reverse=True)
+    return items[: max(0, limit)]
+
+
+def fetch_rss_news(
+    feeds: list[tuple[str, str]],
+    *,
+    per_feed_limit: int = 10,
+    total_limit: int = 40,
+    timeout_seconds: float = 6.0,
+) -> list[dict[str, str]]:
+    """Fetch and merge RSS news from multiple feeds."""
+    merged: list[dict[str, str]] = []
+
+    for source, feed_url in feeds:
+        request = Request(
+            feed_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+                payload = response.read().decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        merged.extend(
+            parse_rss_news_items(
+                payload,
+                source=source,
+                limit=per_feed_limit,
+            )
+        )
+
+    merged.sort(key=lambda row: row.get("published_ts", ""), reverse=True)
+    deduped: list[dict[str, str]] = []
+    seen_links: set[str] = set()
+
+    for item in merged:
+        link = item.get("link", "")
+        if not link or link in seen_links:
+            continue
+        seen_links.add(link)
+        deduped.append(item)
+        if len(deduped) >= max(0, total_limit):
+            break
+
+    return deduped
 
 
 def heartbeat_age_seconds(
