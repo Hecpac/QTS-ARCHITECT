@@ -86,12 +86,22 @@ def _build_live_trader() -> LiveTrader:
             "execution_guardrails": {
                 "enabled": False,
             },
+            "alerts": {
+                "enabled": True,
+                "last_key": "ALERTS:LAST",
+                "event_prefix": "ALERTS:EVENT",
+            },
             "telemetry": {
                 "publish_views": False,
                 "metrics_keys": {
                     "total_value": "METRICS:TOTAL_VALUE",
                     "cash": "METRICS:CASH",
                     "pnl_daily": "METRICS:PNL_DAILY",
+                },
+                "latency_keys": {
+                    "tick_to_decision_ms": "METRICS:LATENCY:TICK_TO_DECISION_MS",
+                    "decision_to_fill_ms": "METRICS:LATENCY:DECISION_TO_FILL_MS",
+                    "tick_to_fill_ms": "METRICS:LATENCY:TICK_TO_FILL_MS",
                 },
             },
         }
@@ -271,6 +281,36 @@ async def test_reconcile_helper_runs_after_ambiguous_submission() -> None:
     refreshed = trader.store.load(trader.oms.PORTFOLIO_KEY, Portfolio)
     assert refreshed is not None
     assert refreshed.blocked_cash == pytest.approx(0.0)
+
+
+def test_emit_alert_publishes_last_alert_key() -> None:
+    trader = _build_live_trader()
+
+    trader._emit_alert(
+        level="WARNING",
+        event="UNIT_TEST",
+        message="alert test",
+        details={"foo": "bar"},
+    )
+
+    payload = trader.store.get("ALERTS:LAST")
+    assert payload is not None
+    assert "UNIT_TEST" in payload
+    assert "alert test" in payload
+
+
+def test_publish_latency_metrics_writes_configured_keys() -> None:
+    trader = _build_live_trader()
+
+    trader._publish_latency_metrics(
+        tick_to_decision_ms=12.5,
+        decision_to_fill_ms=30.0,
+        tick_to_fill_ms=42.5,
+    )
+
+    assert trader.store.get("METRICS:LATENCY:TICK_TO_DECISION_MS") == "12.5"
+    assert trader.store.get("METRICS:LATENCY:DECISION_TO_FILL_MS") == "30.0"
+    assert trader.store.get("METRICS:LATENCY:TICK_TO_FILL_MS") == "42.5"
 
 
 def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() -> None:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -294,6 +295,87 @@ class LiveTrader:
             }
         )
 
+    def _emit_alert(
+        self,
+        *,
+        level: str,
+        event: str,
+        message: str,
+        details: dict[str, str | float | int | bool] | None = None,
+    ) -> None:
+        alerts_cfg = self.cfg.get("alerts")
+        if alerts_cfg and not bool(alerts_cfg.get("enabled", True)):
+            return
+
+        payload: dict[str, str | float | int | bool] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "event": event,
+            "message": message,
+        }
+        if details:
+            payload.update(details)
+
+        try:
+            if alerts_cfg:
+                last_key = alerts_cfg.get("last_key", "ALERTS:LAST")
+                event_prefix = alerts_cfg.get("event_prefix", "ALERTS:EVENT")
+            else:
+                last_key = "ALERTS:LAST"
+                event_prefix = "ALERTS:EVENT"
+
+            event_key = f"{event_prefix}:{int(time.time() * 1000)}"
+            serialized = json.dumps(payload)
+            self.store.set(last_key, serialized)
+            self.store.set(event_key, serialized)
+        except Exception as exc:
+            log.warning("Alert emission failed", event=event, error=str(exc))
+
+    def _publish_latency_metrics(
+        self,
+        *,
+        tick_to_decision_ms: float | None = None,
+        decision_to_fill_ms: float | None = None,
+        tick_to_fill_ms: float | None = None,
+    ) -> None:
+        telemetry_cfg = self.cfg.get("telemetry")
+        if not telemetry_cfg:
+            return
+
+        latency_cfg = telemetry_cfg.get("latency_keys")
+        if not latency_cfg:
+            return
+
+        try:
+            if tick_to_decision_ms is not None:
+                self.store.set(
+                    latency_cfg.get(
+                        "tick_to_decision_ms",
+                        "METRICS:LATENCY:TICK_TO_DECISION_MS",
+                    ),
+                    str(tick_to_decision_ms),
+                )
+
+            if decision_to_fill_ms is not None:
+                self.store.set(
+                    latency_cfg.get(
+                        "decision_to_fill_ms",
+                        "METRICS:LATENCY:DECISION_TO_FILL_MS",
+                    ),
+                    str(decision_to_fill_ms),
+                )
+
+            if tick_to_fill_ms is not None:
+                self.store.set(
+                    latency_cfg.get(
+                        "tick_to_fill_ms",
+                        "METRICS:LATENCY:TICK_TO_FILL_MS",
+                    ),
+                    str(tick_to_fill_ms),
+                )
+        except Exception as exc:
+            log.warning("Latency metrics publish failed", error=str(exc))
+
     def _mark_for_instrument(
         self,
         instrument_id: InstrumentId,
@@ -400,6 +482,16 @@ class LiveTrader:
             total_value=total_value,
             max_session_drawdown=self.max_session_drawdown,
         )
+        self._emit_alert(
+            level="CRITICAL",
+            event="SYSTEM_HALT",
+            message="Emergency halt triggered",
+            details={
+                "reason": reason,
+                "total_value": total_value if total_value is not None else -1.0,
+                "max_session_drawdown": self.max_session_drawdown,
+            },
+        )
 
         await self._liquidate_open_positions()
         await self.ems.stop()
@@ -423,6 +515,12 @@ class LiveTrader:
                 reason=reason,
                 order_id=order_id,
             )
+            self._emit_alert(
+                level="WARNING",
+                event="OMS_RECONCILE_AMBIGUOUS",
+                message="Reconciliation run after ambiguous submission",
+                details={"reason": reason, "order_id": order_id},
+            )
         except Exception as exc:
             log.error(
                 "OMS reconciliation failed after ambiguous submission",
@@ -430,6 +528,12 @@ class LiveTrader:
                 order_id=order_id,
                 error=str(exc),
                 exc_info=True,
+            )
+            self._emit_alert(
+                level="ERROR",
+                event="OMS_RECONCILE_FAILED",
+                message="Reconciliation failed after ambiguous submission",
+                details={"reason": reason, "order_id": order_id, "error": str(exc)},
             )
 
     async def _resolve_liquidation_price(self, instrument_id: InstrumentId) -> float | None:
@@ -635,6 +739,12 @@ class LiveTrader:
                     error=str(exc),
                     exc_info=True,
                 )
+                self._emit_alert(
+                    level="ERROR",
+                    event="STARTUP_RECONCILE_FAILED",
+                    message="Startup reconciliation failed",
+                    details={"error": str(exc)},
+                )
 
             while self.running:
                 # Heartbeat even if no data/decisions
@@ -658,6 +768,8 @@ class LiveTrader:
                     symbol=market_data.instrument_id,
                     price=market_data.close,
                 )
+
+                tick_started_at = time.monotonic()
 
                 # Portfolio-level exposure for risk layer (multi-instrument aware,
                 # includes blocked inventory from pending CLOSE_LONG orders).
@@ -690,8 +802,21 @@ class LiveTrader:
                         daily_pnl_fraction=daily_pnl_fraction,
                     )
                 except Exception as exc:
+                    self._publish_latency_metrics(
+                        tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                    )
                     log.error("Strategy Execution Failed", error=str(exc))
+                    self._emit_alert(
+                        level="ERROR",
+                        event="STRATEGY_EXECUTION_FAILED",
+                        message="Supervisor execution failed",
+                        details={"error": str(exc)},
+                    )
                     continue
+
+                self._publish_latency_metrics(
+                    tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                )
 
                 if not decision:
                     continue
@@ -725,16 +850,31 @@ class LiveTrader:
                 if not order_request:
                     continue
 
+                submit_started_at = time.monotonic()
+
                 try:
                     fill_report = await asyncio.wait_for(
                         self.ems.submit_order(order_request),
                         timeout=self.execution_timeout,
                     )
                 except asyncio.TimeoutError:
+                    self._publish_latency_metrics(
+                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                    )
                     log.error(
                         "Order submission timed out; preserving reservation for reconciliation",
                         order_id=order_request.oms_order_id,
                         timeout_seconds=self.execution_timeout,
+                    )
+                    self._emit_alert(
+                        level="WARNING",
+                        event="ORDER_SUBMISSION_TIMEOUT",
+                        message="Order submission timed out",
+                        details={
+                            "order_id": order_request.oms_order_id,
+                            "timeout_seconds": self.execution_timeout,
+                        },
                     )
                     await self._reconcile_after_ambiguous_submission(
                         reason="submit_timeout",
@@ -742,15 +882,32 @@ class LiveTrader:
                     )
                     continue
                 except Exception as exc:
+                    self._publish_latency_metrics(
+                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                    )
                     log.error(
                         "Order Submission Failed",
                         error=str(exc),
                         order_id=order_request.oms_order_id,
                     )
+                    self._emit_alert(
+                        level="ERROR",
+                        event="ORDER_SUBMISSION_FAILED",
+                        message="Order submission raised an exception",
+                        details={
+                            "order_id": order_request.oms_order_id,
+                            "error": str(exc),
+                        },
+                    )
                     self.oms.revert_allocation(order_request.oms_order_id)
                     continue
 
                 if fill_report:
+                    self._publish_latency_metrics(
+                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                    )
                     try:
                         self.oms.confirm_execution(
                             oms_order_id=fill_report.oms_order_id,
@@ -766,6 +923,15 @@ class LiveTrader:
                             error=str(exc),
                             order_id=order_request.oms_order_id,
                         )
+                        self._emit_alert(
+                            level="ERROR",
+                            event="ORDER_CONFIRMATION_FAILED",
+                            message="Order confirmation failed",
+                            details={
+                                "order_id": order_request.oms_order_id,
+                                "error": str(exc),
+                            },
+                        )
                         await self._reconcile_after_ambiguous_submission(
                             reason="confirm_failed",
                             order_id=order_request.oms_order_id,
@@ -773,9 +939,19 @@ class LiveTrader:
                         continue
                     self._record_order_view(order_request, fill_report)
                 else:
+                    self._publish_latency_metrics(
+                        decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                        tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                    )
                     log.error(
                         "Order Submission Failed or No Report",
                         order_id=order_request.oms_order_id,
+                    )
+                    self._emit_alert(
+                        level="ERROR",
+                        event="ORDER_NO_FILL_REPORT",
+                        message="Order submission returned no fill report",
+                        details={"order_id": order_request.oms_order_id},
                     )
                     self.oms.revert_allocation(order_request.oms_order_id)
 

@@ -44,12 +44,21 @@ execution_guardrails:
 trading:
   timeframe: "1h"
 
+alerts:
+  enabled: true
+  last_key: "ALERTS:LAST"
+  event_prefix: "ALERTS:EVENT"
+
 telemetry:
   publish_views: true
   metrics_keys:
     total_value: "METRICS:TOTAL_VALUE"
     cash: "METRICS:CASH"
     pnl_daily: "METRICS:PNL_DAILY"
+  latency_keys:
+    tick_to_decision_ms: "METRICS:LATENCY:TICK_TO_DECISION_MS"
+    decision_to_fill_ms: "METRICS:LATENCY:DECISION_TO_FILL_MS"
+    tick_to_fill_ms: "METRICS:LATENCY:TICK_TO_FILL_MS"
   orders_key: "VIEW:ORDERS"
   positions_key: "VIEW:POSITIONS"
   last_price_key: "MARKET:LAST_PRICE"
