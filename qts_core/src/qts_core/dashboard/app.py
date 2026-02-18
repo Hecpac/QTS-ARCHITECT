@@ -8,6 +8,7 @@ import redis
 import streamlit as st
 
 from qts_core.dashboard.utils import (
+    fetch_yahoo_chart_rows,
     heartbeat_age_seconds,
     load_alert_events,
     parse_active_symbols,
@@ -35,6 +36,40 @@ redis_client = redis.Redis(
     db=redis_db,
     decode_responses=True,
 )
+
+
+def _build_candlestick_figure(
+    rows: list[dict[str, float | str]],
+    *,
+    title: str,
+    height: int = 360,
+) -> go.Figure:
+    figure = go.Figure(
+        data=[
+            go.Candlestick(
+                x=[row.get("timestamp") for row in rows],
+                open=[row.get("open") for row in rows],
+                high=[row.get("high") for row in rows],
+                low=[row.get("low") for row in rows],
+                close=[row.get("close") for row in rows],
+                name="Price",
+            )
+        ]
+    )
+    figure.update_layout(
+        title=title,
+        height=height,
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
+    )
+    return figure
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_nasdaq_rows(interval: str, range_: str) -> list[dict[str, float | str]]:
+    return fetch_yahoo_chart_rows("^IXIC", interval=interval, range_=range_)
+
 
 # --------------------------------------------------------------------
 # STYLES
@@ -101,7 +136,6 @@ try:
     daily_pnl_fraction = safe_float(redis_client.get("METRICS:PNL_DAILY"))
 
     symbol_last_price_key = symbol_scoped_key("MARKET:LAST_PRICE", selected_symbol)
-    symbol_ohlcv_key = symbol_scoped_key("MARKET:OHLCV", selected_symbol)
 
     last_price = safe_float(
         redis_client.get(symbol_last_price_key) or redis_client.get("MARKET:LAST_PRICE")
@@ -124,7 +158,8 @@ try:
         or redis_client.get("METRICS:LATENCY:TICK_TO_FILL_MS")
     )
 
-    raw_ohlcv = redis_client.get(symbol_ohlcv_key) or redis_client.get("MARKET:OHLCV")
+    ohlcv_rows_by_symbol: dict[str, list[dict[str, float | str]]] = {}
+
     raw_pos = redis_client.get("VIEW:POSITIONS")
     raw_ord = redis_client.get("VIEW:ORDERS")
 
@@ -133,12 +168,22 @@ try:
         scoped_price = redis_client.get(symbol_scoped_key("MARKET:LAST_PRICE", symbol))
         if scoped_price is None:
             continue
+
+        parsed_price = safe_float(scoped_price)
         asset_snapshot_rows.append(
             {
                 "symbol": symbol,
-                "last_price": safe_float(scoped_price),
+                "last_price": parsed_price,
             }
         )
+
+        raw_symbol_ohlcv = redis_client.get(symbol_scoped_key("MARKET:OHLCV", symbol))
+        if raw_symbol_ohlcv is None and symbol == selected_symbol:
+            raw_symbol_ohlcv = redis_client.get("MARKET:OHLCV")
+
+        symbol_rows = safe_json(raw_symbol_ohlcv, default=[])
+        if isinstance(symbol_rows, list) and symbol_rows:
+            ohlcv_rows_by_symbol[symbol] = symbol_rows
 
     last_heartbeat_raw = redis_client.get("SYSTEM:HEARTBEAT")
     last_alert_raw = redis_client.get("ALERTS:LAST")
@@ -152,7 +197,7 @@ except Exception:
     latency_decision_to_fill = 0.0
     latency_tick_to_fill = 0.0
 
-    raw_ohlcv = None
+    ohlcv_rows_by_symbol = {}
     raw_pos = None
     raw_ord = None
     asset_snapshot_rows = []
@@ -205,32 +250,56 @@ tab_chart, tab_pos, tab_alerts, tab_logs = st.tabs(
 )
 
 with tab_chart:
-    ohlcv_rows = safe_json(raw_ohlcv, default=[])
-    if isinstance(ohlcv_rows, list) and ohlcv_rows:
-        fig = go.Figure(
-            data=[
-                go.Candlestick(
-                    x=[row.get("timestamp") for row in ohlcv_rows],
-                    open=[row.get("open") for row in ohlcv_rows],
-                    high=[row.get("high") for row in ohlcv_rows],
-                    low=[row.get("low") for row in ohlcv_rows],
-                    close=[row.get("close") for row in ohlcv_rows],
-                    name="Price",
-                )
-            ]
-        )
-        fig.update_layout(
+    selected_rows = ohlcv_rows_by_symbol.get(selected_symbol, [])
+    if selected_rows:
+        selected_figure = _build_candlestick_figure(
+            selected_rows,
             title=f"{selected_symbol} - Live Action",
-            height=500,
-            template="plotly_dark",
-            xaxis_rangeslider_visible=False,
-            margin={"l": 0, "r": 0, "t": 30, "b": 0},
+            height=450,
         )
-        st.plotly_chart(fig, use_container_width=True)
-        with st.expander("Ver datos crudos (OHLCV)"):
-            st.dataframe(ohlcv_rows[-5:])
+        st.plotly_chart(selected_figure, use_container_width=True)
+        with st.expander("Ver datos crudos (OHLCV) del activo seleccionado"):
+            st.dataframe(selected_rows[-5:])
     else:
-        st.info("Esperando datos de velas (OHLCV)...")
+        st.info(f"Esperando datos de velas (OHLCV) para {selected_symbol}...")
+
+    st.subheader("Charts por activo")
+    for symbol in active_symbols:
+        symbol_rows = ohlcv_rows_by_symbol.get(symbol, [])
+        if not symbol_rows:
+            st.caption(f"Sin OHLCV todavía para {symbol}.")
+            continue
+
+        st.plotly_chart(
+            _build_candlestick_figure(
+                symbol_rows,
+                title=f"{symbol} - Live Action",
+                height=320,
+            ),
+            use_container_width=True,
+        )
+
+    st.subheader("NASDAQ Composite (^IXIC)")
+    nasdaq_interval = os.getenv("NASDAQ_INTERVAL", "1h")
+    nasdaq_range = os.getenv("NASDAQ_RANGE", "5d")
+    nasdaq_rows = _load_nasdaq_rows(nasdaq_interval, nasdaq_range)
+
+    if nasdaq_rows:
+        nasdaq_last_close = nasdaq_rows[-1].get("close", 0.0)
+        st.caption(
+            f"Fuente: Yahoo Finance · interval={nasdaq_interval} · range={nasdaq_range} "
+            f"· last={nasdaq_last_close}"
+        )
+        st.plotly_chart(
+            _build_candlestick_figure(
+                nasdaq_rows,
+                title="NASDAQ Composite (^IXIC)",
+                height=420,
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.warning("No se pudo cargar el gráfico de NASDAQ por ahora.")
 
 with tab_pos:
     col_p, col_o = st.columns(2)

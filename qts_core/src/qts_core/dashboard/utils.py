@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 
 def safe_float(raw: str | None, default: float = 0.0) -> float:
@@ -51,6 +53,110 @@ def parse_active_symbols(raw: str | None) -> list[str]:
         symbols.append(value)
 
     return symbols
+
+
+def parse_yahoo_chart_payload(payload: dict[str, Any]) -> list[dict[str, float | str]]:
+    """Parse Yahoo Finance chart payload into normalized OHLCV rows."""
+    chart = payload.get("chart") if isinstance(payload, dict) else None
+    if not isinstance(chart, dict):
+        return []
+
+    results = chart.get("result")
+    if not isinstance(results, list) or not results:
+        return []
+
+    result = results[0]
+    if not isinstance(result, dict):
+        return []
+
+    timestamps = result.get("timestamp")
+    indicators = result.get("indicators")
+    if not isinstance(timestamps, list) or not isinstance(indicators, dict):
+        return []
+
+    quotes = indicators.get("quote")
+    if not isinstance(quotes, list) or not quotes:
+        return []
+
+    quote_payload = quotes[0]
+    if not isinstance(quote_payload, dict):
+        return []
+
+    opens = quote_payload.get("open")
+    highs = quote_payload.get("high")
+    lows = quote_payload.get("low")
+    closes = quote_payload.get("close")
+    volumes = quote_payload.get("volume")
+
+    if not all(isinstance(series, list) for series in (opens, highs, lows, closes, volumes)):
+        return []
+
+    rows: list[dict[str, float | str]] = []
+    for index, timestamp in enumerate(timestamps):
+        if not isinstance(timestamp, (int, float)):
+            continue
+
+        if index >= len(opens) or index >= len(highs) or index >= len(lows) or index >= len(closes):
+            continue
+
+        open_value = opens[index]
+        high_value = highs[index]
+        low_value = lows[index]
+        close_value = closes[index]
+        volume_value = volumes[index] if index < len(volumes) else 0
+
+        if None in (open_value, high_value, low_value, close_value):
+            continue
+
+        try:
+            row = {
+                "timestamp": datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat(),
+                "open": float(open_value),
+                "high": float(high_value),
+                "low": float(low_value),
+                "close": float(close_value),
+                "volume": float(volume_value or 0.0),
+            }
+        except (TypeError, ValueError):
+            continue
+
+        rows.append(row)
+
+    return rows
+
+
+def fetch_yahoo_chart_rows(
+    symbol: str,
+    *,
+    interval: str = "1h",
+    range_: str = "5d",
+    timeout_seconds: float = 5.0,
+) -> list[dict[str, float | str]]:
+    """Fetch OHLCV rows from Yahoo Finance chart endpoint."""
+    encoded_symbol = quote(symbol, safe="")
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded_symbol}"
+        f"?interval={quote(interval)}&range={quote(range_)}"
+    )
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    return parse_yahoo_chart_payload(payload)
 
 
 def heartbeat_age_seconds(

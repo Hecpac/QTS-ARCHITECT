@@ -7,6 +7,7 @@ from qts_core.dashboard.utils import (
     heartbeat_age_seconds,
     load_alert_events,
     parse_active_symbols,
+    parse_yahoo_chart_payload,
     safe_float,
     symbol_key_suffix,
     symbol_scoped_key,
@@ -75,3 +76,33 @@ def test_load_alert_events_returns_newest_first() -> None:
     assert events[0]["event_epoch_ms"] == 200
     assert events[1]["event"] == "A"
     assert events[1]["event_epoch_ms"] == 100
+
+
+def test_parse_yahoo_chart_payload_returns_normalized_rows() -> None:
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "timestamp": [1708192800, 1708196400],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [100.0, 101.0],
+                                "high": [102.0, 103.0],
+                                "low": [99.0, 100.5],
+                                "close": [101.5, 102.2],
+                                "volume": [1000, 1200],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+
+    rows = parse_yahoo_chart_payload(payload)
+
+    assert len(rows) == 2
+    assert rows[0]["open"] == 100.0
+    assert rows[1]["close"] == 102.2
+    assert "timestamp" in rows[0]
