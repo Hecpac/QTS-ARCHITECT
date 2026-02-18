@@ -28,6 +28,7 @@ packages = [
 # CLI entrypoints
 qts = "qts_core.main:main"
 qts-live = "qts_core.main_live:app"
+qts-alert-relay = "qts_core.ops.alert_relay:main"
 
 # ==============================================================================
 # Dependencies
