@@ -1,0 +1,118 @@
+name: guardrails
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  banned-patterns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Block forbidden patterns in added Python lines
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          def run(*args: str) -> str:
+              return subprocess.check_output(args, text=True).strip()
+
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          head_sha = os.environ.get("GITHUB_SHA", "HEAD")
+          base_sha = os.environ.get("GITHUB_BASE_SHA", "").strip()
+
+          if not base_sha or set(base_sha) == {"0"}:
+              try:
+                  base_sha = run("git", "rev-parse", "HEAD~1")
+              except subprocess.CalledProcessError:
+                  print("No comparable base SHA found; skipping guardrail scan.")
+                  sys.exit(0)
+
+          changed_files_raw = run(
+              "git",
+              "diff",
+              "--name-only",
+              f"{base_sha}...{head_sha}",
+              "--",
+              "qts_core",
+              "tests",
+              "scripts",
+          )
+          changed_files = [
+              f
+              for f in changed_files_raw.splitlines()
+              if f.endswith(".py") and os.path.isfile(f)
+          ]
+
+          if not changed_files:
+              print("No changed Python files in qts_core/tests/scripts.")
+              sys.exit(0)
+
+          checks = [
+              (
+                  "pandas import",
+                  re.compile(r"^\+\s*(?:import\s+pandas\b|from\s+pandas\b)"),
+              ),
+              ("print()", re.compile(r"^\+\s*print\s*\(")),
+              (
+                  "abc.ABC usage",
+                  re.compile(
+                      r"^\+\s*(?:from\s+abc\s+import\s+.*\bABC\b|.*\babc\.ABC\b|class\s+\w+.*\bABC\b)"
+                  ),
+              ),
+          ]
+
+          violations: list[tuple[str, int, str, str]] = []
+          for path in changed_files:
+              diff = run(
+                  "git",
+                  "diff",
+                  "--unified=0",
+                  f"{base_sha}...{head_sha}",
+                  "--",
+                  path,
+              )
+
+              new_line_no = 0
+              for line in diff.splitlines():
+                  if line.startswith("@@"):
+                      match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+                      if match:
+                          new_line_no = int(match.group(1)) - 1
+                      continue
+
+                  if line.startswith("+++") or line.startswith("---"):
+                      continue
+
+                  if line.startswith("+"):
+                      new_line_no += 1
+                      for label, pattern in checks:
+                          if pattern.search(line):
+                              violations.append((path, new_line_no, label, line[1:].rstrip()))
+                  elif line.startswith(" "):
+                      new_line_no += 1
+
+          if violations:
+              print("Forbidden patterns found in newly added lines:\n")
+              for path, line_no, label, text in violations:
+                  print(f"- {path}:{line_no} [{label}] {text}")
+              print("\nGuardrail policy failed.")
+              sys.exit(1)
+
+          print(
+              f"Guardrail scan passed on {len(changed_files)} file(s) for event '{event_name}'."
+          )
+          PY
