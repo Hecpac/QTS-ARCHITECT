@@ -216,7 +216,7 @@ class LiveTrader:
                     limit=50,
                 )
             except Exception as exc:
-                log.warning("fetch_ohlcv failed", error=str(exc))
+                log.warning("fetch_ohlcv failed", error=str(exc), symbol=self.symbol)
                 raw_ohlcv = []
 
             ohlcv_history: list[OHLCVTuple] = []
@@ -261,7 +261,54 @@ class LiveTrader:
                     volume=volume,
                 )
 
-        # Fallback simulation
+            # Data-fetch fallback for live gateways: do NOT sleep or inject synthetic prices.
+            # Prefer ticker snapshot, then cached mark, then last market data for this symbol.
+            price: float | None = None
+
+            try:
+                ticker = await exchange.fetch_ticker(self.symbol)
+                last_price = ticker.get("last") or ticker.get("close")
+                if last_price:
+                    price = float(last_price)
+            except Exception as exc:
+                log.warning("fetch_ticker failed", error=str(exc), symbol=self.symbol)
+
+            if price is None or price <= 0:
+                cached_mark = self._instrument_marks.get(InstrumentId(self.symbol))
+                if cached_mark and cached_mark > 0:
+                    price = float(cached_mark)
+
+            if (
+                (price is None or price <= 0)
+                and self._last_market_data is not None
+                and str(self._last_market_data.instrument_id) == self.symbol
+            ):
+                price = float(self._last_market_data.close)
+
+            if price is not None and price > 0:
+                ts = datetime.now(timezone.utc)
+                self._last_ohlcv_history = [(ts, price, price, price, price, 0.0)]
+                self._last_ohlcv_payload = [
+                    {
+                        "timestamp": ts.isoformat(),
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 0.0,
+                    }
+                ]
+                return MarketData(
+                    instrument_id=InstrumentId(self.symbol),
+                    timestamp=ts,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=0.0,
+                )
+
+        # Fallback simulation (non-live/mock flows only).
         await asyncio.sleep(self.tick_interval)
         price = 100_000.0 + random.uniform(-100, 100)  # noqa: S311
         ts = datetime.now(timezone.utc)
@@ -1007,6 +1054,8 @@ class LiveTrader:
                 )
 
             while self.running:
+                cycle_started_at = time.monotonic()
+
                 # Heartbeat even if no data/decisions
                 self._publish_heartbeat()
 
@@ -1039,7 +1088,8 @@ class LiveTrader:
                         )
 
                 if getattr(self.ems, "exchange", None) is not None:
-                    await asyncio.sleep(self.tick_interval)
+                    elapsed = time.monotonic() - cycle_started_at
+                    await asyncio.sleep(max(0.0, self.tick_interval - elapsed))
 
         except KeyboardInterrupt:
             log.info("Manual Shutdown Requested")

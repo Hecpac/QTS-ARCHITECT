@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -361,6 +362,64 @@ def test_publish_telemetry_writes_symbol_scoped_market_keys() -> None:
     assert active_symbols is not None
     assert "BTC/USDT" in active_symbols
     assert "ETH/USDT" in active_symbols
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_data_uses_ticker_fallback_without_tick_sleep() -> None:
+    trader = _build_live_trader()
+    trader.symbol = "BTC/USDT"
+    trader.tick_interval = 0.5
+
+    class FlakyExchange:
+        async def fetch_ohlcv(self, *_args, **_kwargs):
+            raise RuntimeError("ohlcv unavailable")
+
+        async def fetch_ticker(self, *_args, **_kwargs):
+            return {"last": 12345.6}
+
+    class EMSWithExchange:
+        exchange = FlakyExchange()
+
+    trader.ems = EMSWithExchange()  # type: ignore[assignment]
+
+    started = time.monotonic()
+    market_data = await trader._fetch_live_data()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert market_data.instrument_id == InstrumentId("BTC/USDT")
+    assert market_data.close == pytest.approx(12345.6)
+    assert market_data.open == pytest.approx(12345.6)
+    assert market_data.high == pytest.approx(12345.6)
+    assert market_data.low == pytest.approx(12345.6)
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_data_uses_cached_mark_when_market_calls_fail() -> None:
+    trader = _build_live_trader()
+    trader.symbol = "ETH/USDT"
+    trader.tick_interval = 0.5
+    trader._instrument_marks[InstrumentId("ETH/USDT")] = 1999.5
+
+    class BrokenExchange:
+        async def fetch_ohlcv(self, *_args, **_kwargs):
+            raise RuntimeError("ohlcv unavailable")
+
+        async def fetch_ticker(self, *_args, **_kwargs):
+            raise RuntimeError("ticker unavailable")
+
+    class EMSWithExchange:
+        exchange = BrokenExchange()
+
+    trader.ems = EMSWithExchange()  # type: ignore[assignment]
+
+    started = time.monotonic()
+    market_data = await trader._fetch_live_data()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert market_data.instrument_id == InstrumentId("ETH/USDT")
+    assert market_data.close == pytest.approx(1999.5)
 
 
 def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() -> None:
