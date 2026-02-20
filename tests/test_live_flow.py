@@ -45,6 +45,24 @@ class StubGateway(ExecutionGateway):
         )
 
 
+class NoFillReportGateway(ExecutionGateway):
+    """EMS stub that returns no fill report (ambiguous submission outcome)."""
+
+    async def start(self):
+        return None
+
+    async def stop(self):
+        return None
+
+    async def submit_order(self, order):
+        _ = order
+        await asyncio.sleep(0)
+        return None
+
+    def health_check(self) -> bool:
+        return True
+
+
 def _build_live_trader() -> LiveTrader:
     cfg = OmegaConf.create(
         {
@@ -282,6 +300,54 @@ async def test_reconcile_helper_runs_after_ambiguous_submission() -> None:
     refreshed = trader.store.load(trader.oms.PORTFOLIO_KEY, Portfolio)
     assert refreshed is not None
     assert refreshed.blocked_cash == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_no_fill_report_triggers_ambiguous_reconcile_without_revert() -> None:
+    trader = _build_live_trader()
+    trader.ems = NoFillReportGateway()  # type: ignore[assignment]
+    trader.symbol = "BTC/USDT"
+    trader.symbols = ["BTC/USDT"]
+
+    instrument = InstrumentId("BTC/USDT")
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=101.0,
+        volume=5.0,
+    )
+
+    async def _fake_fetch_live_data() -> MarketData:
+        return market_data
+
+    async def _fake_supervisor_run(*_args, **_kwargs) -> TradingDecision:
+        return TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="unit_test_no_fill_report",
+        )
+
+    trader._fetch_live_data = _fake_fetch_live_data  # type: ignore[method-assign]
+    trader.supervisor.run = _fake_supervisor_run  # type: ignore[method-assign]
+
+    await trader._process_symbol_tick("BTC/USDT")
+
+    open_orders = trader.oms.get_open_orders()
+    assert len(open_orders) == 1
+    assert open_orders[0].status == OrderStatus.SUBMITTED
+
+    refreshed = trader.store.load(trader.oms.PORTFOLIO_KEY, Portfolio)
+    assert refreshed is not None
+    assert refreshed.blocked_cash > 0.0
+    assert refreshed.cash < 100_000.0
+
+    payload = trader.store.get("ALERTS:LAST")
+    assert payload is not None
+    assert "OMS_RECONCILE_AMBIGUOUS" in payload
 
 
 def test_emit_alert_publishes_last_alert_key() -> None:
@@ -528,3 +594,33 @@ async def test_halt_liquidation_attempts_to_close_open_positions() -> None:
     assert refreshed is not None
     assert refreshed.positions.get(instrument, 0.0) == pytest.approx(0.0)
     assert refreshed.blocked_positions.get(instrument, 0.0) == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_halt_liquidation_no_fill_report_preserves_reservation_for_reconcile() -> None:
+    trader = _build_live_trader()
+    trader.ems = NoFillReportGateway()  # type: ignore[assignment]
+
+    instrument = InstrumentId("BTC/USDT")
+    trader.oms.portfolio.positions[instrument] = 1.0
+    trader.store.save(trader.oms.PORTFOLIO_KEY, trader.oms.portfolio)
+    trader._last_market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=10.0,
+    )
+
+    await trader._liquidate_open_positions()
+
+    refreshed = trader.store.load(trader.oms.PORTFOLIO_KEY, Portfolio)
+    assert refreshed is not None
+    assert refreshed.positions.get(instrument, 0.0) == pytest.approx(0.0)
+    assert refreshed.blocked_positions.get(instrument, 0.0) == pytest.approx(1.0)
+
+    payload = trader.store.get("ALERTS:LAST")
+    assert payload is not None
+    assert "OMS_RECONCILE_AMBIGUOUS" in payload

@@ -719,11 +719,14 @@ class LiveTrader:
                 continue
 
             if fill_report is None:
-                log.error(
-                    "Halt liquidation returned no fill; reverting allocation",
+                log.warning(
+                    "Halt liquidation returned no fill report; preserving reservation for reconciliation",
                     order_id=order_request.oms_order_id,
                 )
-                self.oms.revert_allocation(order_request.oms_order_id)
+                await self._reconcile_after_ambiguous_submission(
+                    reason="halt_liquidation_no_fill_report",
+                    order_id=order_request.oms_order_id,
+                )
                 continue
 
             try:
@@ -1050,17 +1053,21 @@ class LiveTrader:
                 tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
                 symbol=instrument_symbol,
             )
-            log.error(
-                "Order Submission Failed or No Report",
+            log.warning(
+                "Order submission returned no fill report; preserving reservation for reconciliation",
                 order_id=order_request.oms_order_id,
             )
             self._emit_alert(
-                level="ERROR",
+                level="WARNING",
                 event="ORDER_NO_FILL_REPORT",
-                message="Order submission returned no fill report",
+                message="Order submission returned no fill report; reconciliation triggered",
                 details={"order_id": order_request.oms_order_id, "symbol": instrument_symbol},
             )
-            self.oms.revert_allocation(order_request.oms_order_id)
+            await self._reconcile_after_ambiguous_submission(
+                reason="submit_no_fill_report",
+                order_id=order_request.oms_order_id,
+            )
+            return
 
         self._publish_telemetry(market_data)
 
