@@ -422,6 +422,48 @@ async def test_fetch_live_data_uses_cached_mark_when_market_calls_fail() -> None
     assert market_data.close == pytest.approx(1999.5)
 
 
+@pytest.mark.asyncio
+async def test_forced_de_risk_exit_bypasses_entry_guardrails() -> None:
+    trader = _build_live_trader()
+    trader.symbol = "BTC/USDT"
+    trader.symbols = ["BTC/USDT"]
+    trader.max_portfolio_exposure_forced_exit = 0.10
+
+    # If guardrails were applied to EXIT, this would reject the trade.
+    trader.guardrails_enabled = True
+    trader.guardrails_min_volume = 10_000.0
+
+    instrument = InstrumentId("BTC/USDT")
+    trader.oms.portfolio.positions[instrument] = 150.0
+    trader._instrument_marks[instrument] = 100.0
+
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=1.0,
+    )
+
+    async def _fake_fetch_live_data() -> MarketData:
+        return market_data
+
+    trader._fetch_live_data = _fake_fetch_live_data  # type: ignore[method-assign]
+
+    await trader.ems.start()
+    try:
+        await trader._process_symbol_tick("BTC/USDT")
+    finally:
+        await trader.ems.stop()
+
+    assert trader.oms.portfolio.positions.get(instrument, 0.0) == pytest.approx(0.0)
+    assert trader.oms.portfolio.blocked_positions.get(instrument, 0.0) == pytest.approx(0.0)
+    assert trader._order_views
+    assert trader._order_views[-1]["side"] == "SELL"
+
+
 def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() -> None:
     trader = _build_live_trader()
 

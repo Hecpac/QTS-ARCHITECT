@@ -175,6 +175,15 @@ class LiveTrader:
         strategies = [instantiate(agent_cfg) for agent_cfg in cfg.agents.strategies]
         risk_agent = instantiate(cfg.agents.risk)
         self.supervisor = Supervisor(strategy_agents=strategies, risk_agent=risk_agent)
+        self.max_portfolio_exposure_forced_exit: float = max(
+            0.0,
+            float(
+                cfg.loop.get(
+                    "max_portfolio_exposure_forced_exit",
+                    getattr(risk_agent, "max_position_size", 0.0),
+                )
+            ),
+        )
 
         self._order_views: list[dict[str, Any]] = []
         self.running = True
@@ -853,26 +862,53 @@ class LiveTrader:
             )
             return
 
-        try:
-            decision = await self.supervisor.run(
-                market_data,
-                ohlcv_history=self._last_ohlcv_history,
-                portfolio_exposure=portfolio_exposure,
-                daily_pnl_fraction=daily_pnl_fraction,
+        decision: TradingDecision | None = None
+        max_exposure_forced_exit = self.max_portfolio_exposure_forced_exit
+        instrument_position = self._effective_position_qty(market_data.instrument_id)
+
+        if (
+            max_exposure_forced_exit > 0
+            and portfolio_exposure > max_exposure_forced_exit
+            and abs(instrument_position) > 1e-8
+        ):
+            decision = TradingDecision(
+                instrument_id=market_data.instrument_id,
+                action=SignalType.EXIT,
+                quantity_modifier=1.0,
+                rationale=(
+                    "Forced de-risk exit: portfolio exposure "
+                    f"{portfolio_exposure:.2%} exceeds {max_exposure_forced_exit:.2%}"
+                ),
+                contributing_agents=["SYSTEM_DE_RISK"],
             )
-        except Exception as exc:
-            self._publish_latency_metrics(
-                tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
-                symbol=instrument_symbol,
+            log.warning(
+                "Exposure-based de-risk EXIT triggered",
+                instrument=instrument_symbol,
+                exposure=portfolio_exposure,
+                max_exposure=max_exposure_forced_exit,
+                instrument_position=instrument_position,
             )
-            log.error("Strategy Execution Failed", symbol=instrument_symbol, error=str(exc))
-            self._emit_alert(
-                level="ERROR",
-                event="STRATEGY_EXECUTION_FAILED",
-                message="Supervisor execution failed",
-                details={"error": str(exc), "symbol": instrument_symbol},
-            )
-            return
+        else:
+            try:
+                decision = await self.supervisor.run(
+                    market_data,
+                    ohlcv_history=self._last_ohlcv_history,
+                    portfolio_exposure=portfolio_exposure,
+                    daily_pnl_fraction=daily_pnl_fraction,
+                )
+            except Exception as exc:
+                self._publish_latency_metrics(
+                    tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                    symbol=instrument_symbol,
+                )
+                log.error("Strategy Execution Failed", symbol=instrument_symbol, error=str(exc))
+                self._emit_alert(
+                    level="ERROR",
+                    event="STRATEGY_EXECUTION_FAILED",
+                    message="Supervisor execution failed",
+                    details={"error": str(exc), "symbol": instrument_symbol},
+                )
+                return
 
         self._publish_latency_metrics(
             tick_to_decision_ms=(time.monotonic() - tick_started_at) * 1000.0,
@@ -882,27 +918,30 @@ class LiveTrader:
         if not decision:
             return
 
-        guarded_decision = apply_execution_guardrails(
-            decision,
-            market_data,
-            enabled=self.guardrails_enabled,
-            min_volume=self.guardrails_min_volume,
-            max_intrabar_volatility=self.guardrails_max_intrabar_volatility,
-            high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
-            max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
-            slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
-        )
-        if not guarded_decision:
-            log.warning(
-                "Order rejected by execution guardrails",
-                instrument=market_data.instrument_id,
-                volume=market_data.volume,
-                intrabar_volatility=max(
-                    0.0,
-                    (market_data.high - market_data.low) / market_data.close,
-                ),
+        if decision.action == SignalType.EXIT:
+            guarded_decision = decision
+        else:
+            guarded_decision = apply_execution_guardrails(
+                decision,
+                market_data,
+                enabled=self.guardrails_enabled,
+                min_volume=self.guardrails_min_volume,
+                max_intrabar_volatility=self.guardrails_max_intrabar_volatility,
+                high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
+                max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
+                slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
             )
-            return
+            if not guarded_decision:
+                log.warning(
+                    "Order rejected by execution guardrails",
+                    instrument=market_data.instrument_id,
+                    volume=market_data.volume,
+                    intrabar_volatility=max(
+                        0.0,
+                        (market_data.high - market_data.low) / market_data.close,
+                    ),
+                )
+                return
 
         order_request = self.oms.process_decision(
             guarded_decision,
