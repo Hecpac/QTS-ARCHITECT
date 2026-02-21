@@ -394,9 +394,20 @@ st.markdown(
         color: #dbe4ef;
     }
 
+    header[data-testid="stHeader"] {
+        background: rgba(11, 16, 32, 0.86);
+        border-bottom: 1px solid rgba(133, 155, 189, 0.22);
+        backdrop-filter: blur(7px);
+    }
+
+    [data-testid="stToolbar"] {
+        top: 0.35rem;
+        right: 0.75rem;
+    }
+
     .block-container {
         max-width: 1520px;
-        padding-top: 1.2rem;
+        padding-top: clamp(2.8rem, 5vh, 3.8rem);
         padding-bottom: 1.25rem;
     }
 
@@ -506,6 +517,9 @@ st.markdown(
     .stTabs [data-baseweb="tab-list"] {
         gap: 0.5rem;
         border-bottom: 1px solid rgba(133, 155, 189, 0.24);
+        flex-wrap: wrap;
+        row-gap: 0.45rem;
+        padding-bottom: 0.25rem;
     }
 
     .stTabs [data-baseweb="tab"] {
@@ -513,6 +527,7 @@ st.markdown(
         border: 1px solid rgba(133, 155, 189, 0.24);
         border-radius: 10px 10px 0 0;
         padding: 0.45rem 0.88rem;
+        min-height: 2.2rem;
         color: #aec0d8;
         font-weight: 620;
     }
@@ -527,6 +542,22 @@ st.markdown(
         border: 1px solid rgba(133, 155, 189, 0.26);
         border-radius: 12px;
         overflow: hidden;
+    }
+
+    @media (max-width: 1100px) {
+        .block-container {
+            padding-top: 3.2rem;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            scrollbar-width: thin;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            white-space: nowrap;
+        }
     }
 
     .stAlert {
