@@ -350,6 +350,135 @@ async def test_no_fill_report_triggers_ambiguous_reconcile_without_revert() -> N
     assert "OMS_RECONCILE_AMBIGUOUS" in payload
 
 
+def test_supervisor_min_confidence_wired_from_config() -> None:
+    """LiveTrader must pass supervisor.min_confidence from config to Supervisor."""
+    cfg = OmegaConf.create(
+        {
+            "env": "test",
+            "symbol": "BTC/USDT",
+            "supervisor": {"min_confidence": 0.42},
+            "oms": {
+                "initial_cash": 100_000.0,
+                "risk_fraction": 0.10,
+                "account_mode": "spot",
+                "short_leverage": 1.0,
+            },
+            "agents": {
+                "strategies": [
+                    {
+                        "_target_": "qts_core.agents.base.TechnicalAgent",
+                        "name": "TrendFollower_A",
+                        "min_confidence": 0.0,
+                    }
+                ],
+                "risk": {
+                    "_target_": "qts_core.agents.base.StrictRiskAgent",
+                    "name": "Risk",
+                },
+            },
+            "store": {"_target_": "qts_core.execution.store.MemoryStore"},
+            "gateway": {
+                "_target_": "qts_core.execution.ems.MockGateway",
+                "default_price": 100.0,
+                "latency_ms": 1.0,
+                "failure_rate": 0.0,
+                "partial_fill_rate": 0.0,
+            },
+            "loop": {
+                "tick_interval": 0.01,
+                "heartbeat_key": "SYSTEM:HEARTBEAT",
+                "execution_timeout": 0.1,
+            },
+            "execution_guardrails": {"enabled": False},
+            "alerts": {
+                "enabled": False,
+                "last_key": "ALERTS:LAST",
+                "event_prefix": "ALERTS:EVENT",
+            },
+            "telemetry": {
+                "publish_views": False,
+                "metrics_keys": {
+                    "total_value": "METRICS:TOTAL_VALUE",
+                    "cash": "METRICS:CASH",
+                    "pnl_daily": "METRICS:PNL_DAILY",
+                },
+                "latency_keys": {
+                    "tick_to_decision_ms": "METRICS:LATENCY:TICK_TO_DECISION_MS",
+                    "decision_to_fill_ms": "METRICS:LATENCY:DECISION_TO_FILL_MS",
+                    "tick_to_fill_ms": "METRICS:LATENCY:TICK_TO_FILL_MS",
+                },
+            },
+        }
+    )
+    trader = LiveTrader(cfg)
+    assert trader.supervisor.min_confidence == pytest.approx(0.42)
+
+
+def test_supervisor_min_confidence_defaults_to_0_6_when_absent() -> None:
+    """LiveTrader must fall back to 0.6 when supervisor key is absent from config."""
+    trader = _build_live_trader()  # no supervisor key in config
+    assert trader.supervisor.min_confidence == pytest.approx(0.6)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_lower_threshold_allows_weak_ta_signals() -> None:
+    """With min_confidence=0.50 a small-move candle (>0.1%) must produce a decision."""
+    store = MemoryStore()
+    oms = OrderManagementSystem(store)
+    supervisor = Supervisor(
+        strategy_agents=[
+            TechnicalAgent("TA_A", bullish_threshold=0.001, min_confidence=0.0),
+        ],
+        risk_agent=StrictRiskAgent("Risk", min_signal_confidence=0.50),
+        min_confidence=0.50,  # Balanced profile value
+    )
+
+    # 0.15% bullish candle → confidence ≈ 0.515; passes 0.50 threshold
+    ts = datetime.now(timezone.utc)
+    history = [(ts, 100.0, 100.5, 99.8, 100.15, 500.0)]
+    market_data = MarketData(
+        instrument_id=InstrumentId("BTC/USDT"),
+        timestamp=ts,
+        open=100.0,
+        high=100.5,
+        low=99.8,
+        close=100.15,
+        volume=500.0,
+    )
+
+    decision = await supervisor.run(market_data, ohlcv_history=history)
+    assert decision is not None
+    assert decision.action == SignalType.LONG
+
+
+@pytest.mark.asyncio
+async def test_supervisor_default_threshold_blocks_weak_ta_signals() -> None:
+    """With the default min_confidence=0.60 a 0.15% candle must NOT produce a decision."""
+    supervisor = Supervisor(
+        strategy_agents=[
+            TechnicalAgent("TA_A", bullish_threshold=0.001, min_confidence=0.0),
+        ],
+        risk_agent=StrictRiskAgent("Risk", min_signal_confidence=0.50),
+        min_confidence=0.60,  # old default
+    )
+
+    ts = datetime.now(timezone.utc)
+    history = [(ts, 100.0, 100.5, 99.8, 100.15, 500.0)]
+    market_data = MarketData(
+        instrument_id=InstrumentId("BTC/USDT"),
+        timestamp=ts,
+        open=100.0,
+        high=100.5,
+        low=99.8,
+        close=100.15,
+        volume=500.0,
+    )
+
+    decision = await supervisor.run(market_data, ohlcv_history=history)
+    # confidence ≈ 0.515 < 0.60 → no actionable signals
+    assert decision is None
+
+
 def test_emit_alert_publishes_last_alert_key() -> None:
     trader = _build_live_trader()
 

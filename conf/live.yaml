@@ -17,37 +17,42 @@ oms:
   account_mode: "margin"
   short_leverage: 1.0
 
+supervisor:
+  min_confidence: 0.50  # Balanced: was hardcoded 0.60; lowered to allow TA signals through
+
 agents:
   strategies:
     - _target_: qts_core.agents.base.TechnicalAgent
       name: TrendFollower_A
-      bullish_threshold: 0.002
+      bullish_threshold: 0.001  # Balanced: was 0.002; confidence≥0.51 at 0.1% move
     - _target_: qts_core.agents.base.TechnicalAgent
       name: MeanReversion_B
-      bullish_threshold: 0.002
+      bullish_threshold: 0.001  # Balanced: was 0.002
     - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
       name: ICT_Sniper_NY
       symbol: BTC/USDT
-      session_start: 0
-      session_end: 24
+      session_start: 13  # Balanced: restored NY+London overlap (13-17 UTC); was 0
+      session_end: 17
   risk:
     _target_: qts_core.agents.base.StrictRiskAgent
     name: GlobalRiskOfficer
+    min_signal_confidence: 0.60  # Balanced: was implicit 0.70; aligned with supervisor
+    max_position_size: 0.10
 
 loop:
   tick_interval: 10.0
   heartbeat_key: "SYSTEM:HEARTBEAT"
   execution_timeout: 20.0
   max_session_drawdown: 0.10
-  entry_cooldown_seconds: 90.0
+  entry_cooldown_seconds: 60.0  # Balanced: was 90; redundant with per-candle limit
   max_entries_per_candle_per_symbol: 1
 
 execution_guardrails:
   enabled: true
   min_volume: 0.10
   max_intrabar_volatility: 0.05
-  high_volatility_size_scale: 0.40
-  max_estimated_slippage_bps: 30.0
+  high_volatility_size_scale: 0.60  # Balanced: was 0.40; less punishing in volatile moves
+  max_estimated_slippage_bps: 50.0  # Balanced: was 30; 30 blocked 1h candles with >1.2% range
   slippage_volatility_factor: 0.25
 
 trading:

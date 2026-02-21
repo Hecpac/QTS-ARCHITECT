@@ -208,7 +208,15 @@ class LiveTrader:
 
         strategies = [instantiate(agent_cfg) for agent_cfg in cfg.agents.strategies]
         risk_agent = instantiate(cfg.agents.risk)
-        self.supervisor = Supervisor(strategy_agents=strategies, risk_agent=risk_agent)
+        supervisor_cfg = cfg.get("supervisor")
+        supervisor_min_confidence: float = float(
+            supervisor_cfg.get("min_confidence", 0.6) if supervisor_cfg else 0.6
+        )
+        self.supervisor = Supervisor(
+            strategy_agents=strategies,
+            risk_agent=risk_agent,
+            min_confidence=supervisor_min_confidence,
+        )
         self.max_portfolio_exposure_forced_exit: float = max(
             0.0,
             float(
