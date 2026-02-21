@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import time
 
@@ -385,37 +386,211 @@ def _render_audio_alert(trigger: bool, token: str) -> None:
 st.markdown(
     """
 <style>
-    .metric-card {
-        background-color: #1e1e1e;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #333;
+    .stApp {
+        background:
+            radial-gradient(1200px 420px at 15% -10%, rgba(55, 95, 160, 0.15), transparent),
+            radial-gradient(900px 320px at 95% 0%, rgba(10, 114, 89, 0.14), transparent),
+            #0b1020;
+        color: #dbe4ef;
     }
-    .stAlert {margin-top: 10px;}
+
+    .block-container {
+        max-width: 1520px;
+        padding-top: 1.2rem;
+        padding-bottom: 1.25rem;
+    }
+
+    .dashboard-hero {
+        padding: 0.8rem 0 0.25rem 0;
+    }
+
+    .hero-kicker {
+        margin: 0;
+        color: #8b9db8;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-size: 0.72rem;
+        font-weight: 700;
+    }
+
+    .hero-title {
+        margin: 0.28rem 0 0;
+        color: #f2f6fc;
+        font-size: clamp(1.4rem, 2.2vw, 2rem);
+        line-height: 1.15;
+        font-weight: 750;
+    }
+
+    .hero-subtitle {
+        margin: 0.4rem 0 0;
+        color: #9cb0c9;
+        font-size: 0.95rem;
+    }
+
+    .status-pill {
+        border-radius: 999px;
+        padding: 0.34rem 0.7rem;
+        font-size: 0.75rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        text-align: center;
+        margin-bottom: 0.45rem;
+        border: 1px solid transparent;
+        font-weight: 700;
+    }
+
+    .status-running {
+        background: rgba(24, 196, 129, 0.12);
+        color: #53e3af;
+        border-color: rgba(24, 196, 129, 0.4);
+    }
+
+    .status-halted {
+        background: rgba(239, 83, 80, 0.14);
+        color: #ff8684;
+        border-color: rgba(239, 83, 80, 0.45);
+    }
+
+    .kpi-card {
+        background: linear-gradient(160deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
+        border: 1px solid rgba(155, 175, 210, 0.24);
+        border-radius: 14px;
+        padding: 0.8rem 0.9rem;
+        min-height: 105px;
+        box-shadow: 0 10px 24px rgba(3, 7, 18, 0.34);
+    }
+
+    .kpi-label {
+        color: #8fa4bf;
+        font-size: 0.73rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-weight: 650;
+        margin-bottom: 0.42rem;
+    }
+
+    .kpi-value {
+        font-size: clamp(1.2rem, 1.5vw, 1.8rem);
+        line-height: 1.1;
+        font-weight: 760;
+        color: #f7fbff;
+        margin-bottom: 0.26rem;
+    }
+
+    .kpi-positive { color: #52e2a8; }
+    .kpi-warning { color: #f5c063; }
+    .kpi-danger { color: #ff8d8b; }
+
+    .kpi-subtitle {
+        color: #7f93ad;
+        font-size: 0.76rem;
+    }
+
+    .symbol-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.6rem 0 0.3rem;
+    }
+
+    .symbol-chip {
+        border: 1px solid rgba(133, 155, 189, 0.35);
+        border-radius: 999px;
+        padding: 0.2rem 0.58rem;
+        font-size: 0.72rem;
+        color: #c7d4e6;
+        background: rgba(22, 32, 54, 0.72);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0.5rem;
+        border-bottom: 1px solid rgba(133, 155, 189, 0.24);
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        background: rgba(18, 29, 48, 0.9);
+        border: 1px solid rgba(133, 155, 189, 0.24);
+        border-radius: 10px 10px 0 0;
+        padding: 0.45rem 0.88rem;
+        color: #aec0d8;
+        font-weight: 620;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: rgba(41, 90, 166, 0.28);
+        color: #f2f6fc;
+        border-color: rgba(92, 143, 228, 0.68);
+    }
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid rgba(133, 155, 189, 0.26);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    .stAlert {
+        margin-top: 0.45rem;
+        border-radius: 10px;
+    }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
+def _render_kpi_card(label: str, value: str, subtitle: str, tone: str = "neutral") -> None:
+    safe_label = html.escape(label)
+    safe_value = html.escape(value)
+    safe_subtitle = html.escape(subtitle)
+    tone_class = f"kpi-{tone}" if tone in {"positive", "warning", "danger"} else ""
+
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-label">{safe_label}</div>
+            <div class="kpi-value {tone_class}">{safe_value}</div>
+            <div class="kpi-subtitle">{safe_subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _latency_tone(value_ms: float) -> str:
+    if value_ms <= 120:
+        return "positive"
+    if value_ms <= 320:
+        return "warning"
+    return "danger"
+
+
 # --------------------------------------------------------------------
 # HEADER & KILL SWITCH
 # --------------------------------------------------------------------
-col_head1, col_head2 = st.columns([3, 1])
+col_head1, col_head2 = st.columns([3.8, 1.2])
 with col_head1:
-    st.title("⚡ QTS Architect | Live Terminal")
-    st.caption("Quantitative Trading System • Multi-Agent • ICT Logic")
+    st.markdown(
+        """
+        <div class="dashboard-hero">
+            <p class="hero-kicker">QTS Architect</p>
+            <h1 class="hero-title">Live Execution Terminal</h1>
+            <p class="hero-subtitle">Multi-asset monitoring · risk-first execution · low-latency telemetry</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 with col_head2:
     system_status = redis_client.get("SYSTEM:HALT")
     if system_status == "true":
-        st.error("🔴 SYSTEM HALTED")
-        if st.button("♻️ RESUME OPERATIONS", use_container_width=True):
+        st.markdown('<div class="status-pill status-halted">System Halted</div>', unsafe_allow_html=True)
+        if st.button("♻️ Resume", use_container_width=True):
             redis_client.set("SYSTEM:HALT", "false")
             st.rerun()
     else:
-        st.success("🟢 SYSTEM RUNNING")
-        if st.button("🚨 EMERGENCY STOP", type="primary", use_container_width=True):
+        st.markdown('<div class="status-pill status-running">System Running</div>', unsafe_allow_html=True)
+        if st.button("🚨 Emergency Stop", type="primary", use_container_width=True):
             redis_client.set("SYSTEM:HALT", "true")
             st.rerun()
 
@@ -436,7 +611,7 @@ try:
 except Exception:
     active_symbols = default_symbols
 
-selected_symbol = st.selectbox("Activo", options=active_symbols, index=0)
+selected_symbol = st.selectbox("Activo principal", options=active_symbols, index=0)
 
 try:
     total_val = safe_float(redis_client.get("METRICS:TOTAL_VALUE"))
@@ -538,27 +713,70 @@ heartbeat_age = heartbeat_age_seconds(last_heartbeat_raw)
 heartbeat_stale_seconds = int(os.getenv("HEARTBEAT_STALE_SECONDS", "15"))
 
 # --------------------------------------------------------------------
-# METRIC ROW
+# KPI ROW (professional cards)
 # --------------------------------------------------------------------
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("💰 Total Equity", f"${total_val:,.2f}")
-m2.metric("💵 Cash Available", f"${cash:,.2f}")
-m3.metric(f"{selected_symbol} Price", f"${last_price:,.2f}")
-m4.metric("Daily PnL", f"{daily_pnl_fraction * 100:+.2f}%")
-if heartbeat_age is None:
-    m5.metric("Heartbeat Age", "N/A")
-else:
-    m5.metric("Heartbeat Age", f"{heartbeat_age:,.1f}s")
+heartbeat_value = "N/A" if heartbeat_age is None else f"{heartbeat_age:,.1f}s"
+heartbeat_tone = "danger" if heartbeat_age is not None and heartbeat_age > heartbeat_stale_seconds else "positive"
+daily_pnl_pct = daily_pnl_fraction * 100
+
+equity_cols = st.columns(5)
+with equity_cols[0]:
+    _render_kpi_card("Total Equity", f"${total_val:,.2f}", "Portfolio valuation")
+with equity_cols[1]:
+    _render_kpi_card("Cash Available", f"${cash:,.2f}", "Free buying power")
+with equity_cols[2]:
+    _render_kpi_card(
+        f"{selected_symbol} Price",
+        f"${last_price:,.2f}",
+        f"Change {selected_change_pct:+.2f}%",
+        tone="positive" if selected_change_pct >= 0 else "danger",
+    )
+with equity_cols[3]:
+    _render_kpi_card(
+        "Daily PnL",
+        f"{daily_pnl_pct:+.2f}%",
+        "Session performance",
+        tone="positive" if daily_pnl_pct >= 0 else "danger",
+    )
+with equity_cols[4]:
+    _render_kpi_card(
+        "Heartbeat Age",
+        heartbeat_value,
+        f"Stale threshold {heartbeat_stale_seconds}s",
+        tone=heartbeat_tone,
+    )
+
+if active_symbols:
+    chips_markup = "".join(f'<span class="symbol-chip">{html.escape(symbol)}</span>' for symbol in active_symbols)
+    st.markdown(f'<div class="symbol-chip-row">{chips_markup}</div>', unsafe_allow_html=True)
 
 _render_websocket_ticker(active_symbols)
 
 # --------------------------------------------------------------------
 # LATENCY ROW
 # --------------------------------------------------------------------
-l1, l2, l3 = st.columns(3)
-l1.metric("Latency Tick→Decision", f"{latency_tick_to_decision:,.1f} ms")
-l2.metric("Latency Decision→Fill", f"{latency_decision_to_fill:,.1f} ms")
-l3.metric("Latency Tick→Fill", f"{latency_tick_to_fill:,.1f} ms")
+latency_cols = st.columns(3)
+with latency_cols[0]:
+    _render_kpi_card(
+        "Tick → Decision",
+        f"{latency_tick_to_decision:,.1f} ms",
+        "Signal generation latency",
+        tone=_latency_tone(latency_tick_to_decision),
+    )
+with latency_cols[1]:
+    _render_kpi_card(
+        "Decision → Fill",
+        f"{latency_decision_to_fill:,.1f} ms",
+        "Execution latency",
+        tone=_latency_tone(latency_decision_to_fill),
+    )
+with latency_cols[2]:
+    _render_kpi_card(
+        "Tick → Fill",
+        f"{latency_tick_to_fill:,.1f} ms",
+        "End-to-end latency",
+        tone=_latency_tone(latency_tick_to_fill),
+    )
 
 if heartbeat_age is None:
     st.warning("Heartbeat no disponible todavía.")
@@ -597,14 +815,21 @@ if audio_enabled:
         _render_audio_alert(True, trigger_token)
 
 if asset_snapshot_rows:
-    st.subheader("Market Watch")
-    st.dataframe(
+    market_watch_rows = sorted(
         asset_snapshot_rows,
+        key=lambda row: abs(safe_float(row.get("change_pct"))),
+        reverse=True,
+    )
+
+    st.subheader("Market Watch")
+    st.caption("Snapshot en tiempo real · ordenado por movimiento porcentual")
+    st.dataframe(
+        market_watch_rows,
         use_container_width=True,
         column_config={
             "symbol": st.column_config.TextColumn("Symbol"),
             "last_price": st.column_config.NumberColumn("Last", format="%.6f"),
-            "change_pct": st.column_config.NumberColumn("Change %", format="%.2f%%"),
+            "change_pct": st.column_config.NumberColumn("Change %", format="%+.2f%%"),
         },
         hide_index=True,
     )
