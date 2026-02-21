@@ -13,7 +13,7 @@ symbols:
 
 oms:
   initial_cash: 100000.0
-  risk_fraction: 0.10
+  risk_fraction: 0.04
   account_mode: "margin"
   short_leverage: 1.0
 
@@ -21,8 +21,10 @@ agents:
   strategies:
     - _target_: qts_core.agents.base.TechnicalAgent
       name: TrendFollower_A
+      bullish_threshold: 0.002
     - _target_: qts_core.agents.base.TechnicalAgent
       name: MeanReversion_B
+      bullish_threshold: 0.002
     - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
       name: ICT_Sniper_NY
       symbol: BTC/USDT
@@ -37,13 +39,15 @@ loop:
   heartbeat_key: "SYSTEM:HEARTBEAT"
   execution_timeout: 20.0
   max_session_drawdown: 0.10
+  entry_cooldown_seconds: 90.0
+  max_entries_per_candle_per_symbol: 1
 
 execution_guardrails:
   enabled: true
   min_volume: 0.10
   max_intrabar_volatility: 0.05
-  high_volatility_size_scale: 0.50
-  max_estimated_slippage_bps: 75.0
+  high_volatility_size_scale: 0.40
+  max_estimated_slippage_bps: 30.0
   slippage_volatility_factor: 0.25
 
 trading:

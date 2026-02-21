@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -528,6 +528,113 @@ async def test_forced_de_risk_exit_bypasses_entry_guardrails() -> None:
     assert trader.oms.portfolio.blocked_positions.get(instrument, 0.0) == pytest.approx(0.0)
     assert trader._order_views
     assert trader._order_views[-1]["side"] == "SELL"
+    assert trader._order_views[-1]["instrument_id"] == "BTC/USDT"
+
+
+@pytest.mark.asyncio
+async def test_entry_per_candle_limit_blocks_repeat_entry_same_candle() -> None:
+    trader = _build_live_trader()
+    trader.symbol = "BTC/USDT"
+    trader.symbols = ["BTC/USDT"]
+    trader.entry_cooldown_seconds = 0.0
+    trader.max_entries_per_candle_per_symbol = 1
+
+    instrument = InstrumentId("BTC/USDT")
+    candle_ts = datetime.now(timezone.utc)
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=candle_ts,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=5.0,
+    )
+
+    async def _fake_fetch_live_data() -> MarketData:
+        return market_data
+
+    async def _fake_supervisor_run(*_args, **_kwargs) -> TradingDecision:
+        return TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="unit_test_per_candle_limit",
+        )
+
+    trader._fetch_live_data = _fake_fetch_live_data  # type: ignore[method-assign]
+    trader.supervisor.run = _fake_supervisor_run  # type: ignore[method-assign]
+
+    await trader.ems.start()
+    try:
+        await trader._process_symbol_tick("BTC/USDT")
+        cash_after_first_fill = trader.oms.portfolio.cash
+
+        await trader._process_symbol_tick("BTC/USDT")
+    finally:
+        await trader.ems.stop()
+
+    assert len(trader._order_views) == 1
+    assert trader.oms.portfolio.cash == pytest.approx(cash_after_first_fill)
+
+
+@pytest.mark.asyncio
+async def test_entry_cooldown_blocks_second_entry_even_on_new_candle() -> None:
+    trader = _build_live_trader()
+    trader.symbol = "BTC/USDT"
+    trader.symbols = ["BTC/USDT"]
+    trader.entry_cooldown_seconds = 600.0
+    trader.max_entries_per_candle_per_symbol = 5
+    trader.max_portfolio_exposure_forced_exit = 0.0
+
+    instrument = InstrumentId("BTC/USDT")
+    base_ts = datetime.now(timezone.utc)
+    market_ticks = [
+        MarketData(
+            instrument_id=instrument,
+            timestamp=base_ts,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=5.0,
+        ),
+        MarketData(
+            instrument_id=instrument,
+            timestamp=base_ts + timedelta(hours=1),
+            open=100.0,
+            high=102.0,
+            low=99.0,
+            close=101.0,
+            volume=5.0,
+        ),
+    ]
+
+    async def _fake_fetch_live_data() -> MarketData:
+        return market_ticks.pop(0)
+
+    async def _fake_supervisor_run(*_args, **_kwargs) -> TradingDecision:
+        return TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="unit_test_cooldown",
+        )
+
+    trader._fetch_live_data = _fake_fetch_live_data  # type: ignore[method-assign]
+    trader.supervisor.run = _fake_supervisor_run  # type: ignore[method-assign]
+
+    await trader.ems.start()
+    try:
+        await trader._process_symbol_tick("BTC/USDT")
+        cash_after_first_fill = trader.oms.portfolio.cash
+
+        await trader._process_symbol_tick("BTC/USDT")
+    finally:
+        await trader.ems.stop()
+
+    assert len(trader._order_views) == 1
+    assert trader.oms.portfolio.cash == pytest.approx(cash_after_first_fill)
 
 
 def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() -> None:

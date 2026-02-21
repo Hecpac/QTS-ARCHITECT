@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import logging
 import random
+import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import hydra
@@ -92,16 +95,39 @@ def apply_execution_guardrails(
     )
 
 
+class _TeeStream:
+    """Mirror writes to both stdout and a local file handle."""
+
+    def __init__(self, *streams: Any) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> None:
+        for stream in self._streams:
+            stream.write(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Configure logging for the live trader."""
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO))
+    log_path = Path("main_live.log")
+    file_stream = log_path.open("a", encoding="utf-8", buffering=1)
+    atexit.register(file_stream.close)
+    tee_stream = _TeeStream(sys.stdout, file_stream)
+
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        stream=tee_stream,
+    )
     structlog.configure(
         processors=[
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.add_log_level,
             structlog.processors.JSONRenderer(),
         ],
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.PrintLoggerFactory(file=tee_stream),
         cache_logger_on_first_use=True,
     )
 
@@ -131,6 +157,14 @@ class LiveTrader:
         self.execution_timeout: float = max(
             0.1,
             float(cfg.loop.get("execution_timeout", max(5.0, self.tick_interval * 2))),
+        )
+        self.entry_cooldown_seconds: float = max(
+            0.0,
+            float(cfg.loop.get("entry_cooldown_seconds", 0.0)),
+        )
+        self.max_entries_per_candle_per_symbol: int = max(
+            1,
+            int(cfg.loop.get("max_entries_per_candle_per_symbol", 1)),
         )
 
         guardrails_cfg = cfg.get("execution_guardrails")
@@ -186,6 +220,9 @@ class LiveTrader:
         )
 
         self._order_views: list[dict[str, Any]] = []
+        self._entry_cooldown_until: dict[str, datetime] = {}
+        self._entry_candle_key_by_symbol: dict[str, str] = {}
+        self._entry_count_by_symbol: dict[str, int] = {}
         self.running = True
 
         # Daily PnL anchor for max_daily_loss enforcement in risk review.
@@ -348,6 +385,82 @@ class LiveTrader:
         halt_flag = self.store.get("SYSTEM:HALT")
         return bool(halt_flag and str(halt_flag).lower() == "true")
 
+    @staticmethod
+    def _signal_type_str(action: SignalType | str) -> str:
+        if isinstance(action, SignalType):
+            return action.value
+        return str(action).upper()
+
+    @classmethod
+    def _is_entry_action(cls, action: SignalType | str) -> bool:
+        return cls._signal_type_str(action) in {SignalType.LONG.value, SignalType.SHORT.value}
+
+    def _sync_entry_candle_window(self, symbol: str, candle_timestamp: datetime) -> None:
+        candle_key = candle_timestamp.astimezone(timezone.utc).isoformat()
+        if self._entry_candle_key_by_symbol.get(symbol) == candle_key:
+            return
+
+        self._entry_candle_key_by_symbol[symbol] = candle_key
+        self._entry_count_by_symbol[symbol] = 0
+
+    def _entry_is_throttled(
+        self,
+        *,
+        symbol: str,
+        action: SignalType | str,
+        candle_timestamp: datetime,
+    ) -> bool:
+        if not self._is_entry_action(action):
+            return False
+
+        action_label = self._signal_type_str(action)
+
+        now = datetime.now(timezone.utc)
+        cooldown_until = self._entry_cooldown_until.get(symbol)
+        if cooldown_until and now < cooldown_until:
+            remaining_seconds = (cooldown_until - now).total_seconds()
+            log.info(
+                "Entry throttled by cooldown",
+                instrument=symbol,
+                action=action_label,
+                cooldown_seconds_remaining=max(0.0, remaining_seconds),
+            )
+            return True
+
+        self._sync_entry_candle_window(symbol, candle_timestamp)
+        entries_in_candle = self._entry_count_by_symbol.get(symbol, 0)
+        if entries_in_candle >= self.max_entries_per_candle_per_symbol:
+            log.info(
+                "Entry throttled by per-candle limit",
+                instrument=symbol,
+                action=action_label,
+                entries_in_candle=entries_in_candle,
+                per_candle_limit=self.max_entries_per_candle_per_symbol,
+            )
+            return True
+
+        return False
+
+    def _mark_entry_executed(
+        self,
+        *,
+        symbol: str,
+        action: SignalType | str,
+        candle_timestamp: datetime,
+    ) -> None:
+        if not self._is_entry_action(action):
+            return
+
+        self._sync_entry_candle_window(symbol, candle_timestamp)
+        self._entry_count_by_symbol[symbol] = self._entry_count_by_symbol.get(symbol, 0) + 1
+
+        if self.entry_cooldown_seconds <= 0:
+            return
+
+        self._entry_cooldown_until[symbol] = datetime.now(timezone.utc) + timedelta(
+            seconds=self.entry_cooldown_seconds
+        )
+
     def _record_order_view(
         self,
         order_request: OrderRequest,
@@ -356,9 +469,14 @@ class LiveTrader:
         self._order_views.append(
             {
                 "order_id": order_request.oms_order_id,
+                "instrument_id": str(order_request.instrument_id),
                 "side": order_request.side.value,
+                "intent": order_request.intent.value,
                 "qty": order_request.quantity,
+                "fill_qty": fill_report.quantity,
                 "price": fill_report.price,
+                "fee": fill_report.fee,
+                "exchange_order_id": fill_report.exchange_order_id,
                 "status": "FILLED",
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
@@ -946,6 +1064,13 @@ class LiveTrader:
                 )
                 return
 
+        if self._entry_is_throttled(
+            symbol=instrument_symbol,
+            action=guarded_decision.action,
+            candle_timestamp=market_data.timestamp,
+        ):
+            return
+
         order_request = self.oms.process_decision(
             guarded_decision,
             current_price=market_data.close,
@@ -1047,6 +1172,11 @@ class LiveTrader:
                 )
                 return
             self._record_order_view(order_request, fill_report)
+            self._mark_entry_executed(
+                symbol=instrument_symbol,
+                action=guarded_decision.action,
+                candle_timestamp=market_data.timestamp,
+            )
         else:
             self._publish_latency_metrics(
                 decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,

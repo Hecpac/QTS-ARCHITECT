@@ -198,6 +198,30 @@ class TestICTSmartMoneyAgent:
         assert signal is None
 
     @pytest.mark.asyncio
+    async def test_no_signal_on_symbol_mismatch(
+        self,
+        timestamp: datetime,
+        bullish_ohlcv_history: list,
+    ) -> None:
+        """Should ignore candles from instruments outside the configured symbol."""
+        agent = ICTSmartMoneyAgent(
+            name="ict_test",
+            symbol="BTC/USDT",
+            session_start=13,
+            session_end=16,
+            min_fvg_size=0.001,
+        )
+
+        signal = await agent.analyze(
+            instrument_id=InstrumentId("ETH/USDT"),
+            current_price=109.0,
+            timestamp=timestamp,
+            ohlcv_history=bullish_ohlcv_history,
+        )
+
+        assert signal is None
+
+    @pytest.mark.asyncio
     async def test_no_signal_without_fvg(
         self,
         instrument_id: InstrumentId,

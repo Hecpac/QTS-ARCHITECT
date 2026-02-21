@@ -202,6 +202,16 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         Returns:
             AgentSignal if FVG detected in kill zone, None otherwise.
         """
+        instrument_symbol = str(instrument_id)
+        if instrument_symbol.upper() != self.symbol.upper():
+            log.debug(
+                "Instrument mismatch for ICT agent",
+                agent=self.name,
+                configured_symbol=self.symbol,
+                received_symbol=instrument_symbol,
+            )
+            return None
+
         # Only trade during kill zones
         if not self._is_in_kill_zone(timestamp):
             log.debug(
