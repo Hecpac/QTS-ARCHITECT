@@ -20,7 +20,7 @@ oms:
   min_short_liquidation_buffer: 0.05
 
 supervisor:
-  min_confidence: 0.50  # Balanced: was hardcoded 0.60; lowered to allow TA signals through
+  min_confidence: 0.60  # Strict default (OOS 7d/14d, 2026-02-22)
 
 agents:
   strategies:
@@ -38,9 +38,9 @@ agents:
   risk:
     _target_: qts_core.agents.base.StrictRiskAgent
     name: GlobalRiskOfficer
-    min_signal_confidence: 0.60  # Balanced: was implicit 0.70; aligned with supervisor
-    max_position_size: 0.10
-    max_short_exposure: 0.10  # Tuned via sweep (was 0.08)
+    min_signal_confidence: 0.70  # Strict default (OOS 7d/14d, 2026-02-22)
+    max_position_size: 0.15
+    max_short_exposure: 0.15
 
 loop:
   tick_interval: 10.0
