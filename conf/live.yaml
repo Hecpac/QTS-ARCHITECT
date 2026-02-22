@@ -59,7 +59,7 @@ execution_guardrails:
   slippage_volatility_factor: 0.25
   high_volatility_hours_utc: [14, 15, 16, 17, 18]  # Deep-dive 50d hotspot window
   high_volatility_hours_size_scale: 1.0
-  high_volatility_hours_entry_block: true  # Defensive mode: block entries in hotspot hours
+  high_volatility_hours_entry_block: false  # Disabled after rolling 7d validation (underperformed vs no guard)
 
 trading:
   timeframe: "1h"
