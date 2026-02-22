@@ -419,6 +419,32 @@ class TestFilterValidLabels:
         assert len(result) == 3
 
 
+class _TwoStepBacktestSupervisor:
+    """Deterministic supervisor for two-bar backtest tests."""
+
+    def __init__(self, instrument_id: InstrumentId) -> None:
+        self.instrument_id = instrument_id
+        self._calls = 0
+
+    async def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+        if self._calls == 1:
+            return TradingDecision(
+                instrument_id=self.instrument_id,
+                action=SignalType.SHORT,
+                quantity_modifier=1.0,
+                rationale="open short",
+            )
+        if self._calls == 2:
+            return TradingDecision(
+                instrument_id=self.instrument_id,
+                action=SignalType.EXIT,
+                quantity_modifier=1.0,
+                rationale="close short",
+            )
+        return None
+
+
 class TestEventEngineExitSemantics:
     """Tests for EXIT behavior with signed positions."""
 
@@ -522,3 +548,36 @@ class TestEventEngineExitSemantics:
         assert engine.state.short_borrow_fees_paid == pytest.approx(2.0, rel=1e-2)
         assert engine.state.get_position(instrument) == pytest.approx(0.0)
         assert instrument not in engine.state.short_opened_at
+
+    @pytest.mark.asyncio
+    async def test_run_final_capital_reflects_short_borrow_fee(self) -> None:
+        """Backtest final capital should include carry cost after last fill."""
+        instrument = InstrumentId("BTC/USDT")
+        supervisor = _TwoStepBacktestSupervisor(instrument)
+        config = BacktestConfig(
+            initial_capital=100_000.0,
+            trade_size=10_000.0,
+            short_borrow_rate_bps_per_day=100.0,
+            commission_bps=0.0,
+            slippage_bps=0.0,
+        )
+        engine = EventEngine(supervisor=supervisor, config=config)
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        data_feed = pl.DataFrame(
+            {
+                "timestamp": [start, start + timedelta(days=1)],
+                "instrument_id": [str(instrument), str(instrument)],
+                "open": [100.0, 100.0],
+                "high": [101.0, 101.0],
+                "low": [99.0, 99.0],
+                "close": [100.0, 100.0],
+                "volume": [1000.0, 1000.0],
+            }
+        )
+
+        result = await engine.run(data_feed)
+
+        # One-day borrow on 10,000 notional at 1%/day => 100.
+        assert engine.state.short_borrow_fees_paid == pytest.approx(100.0, rel=1e-2)
+        assert result.final_capital == pytest.approx(99_900.0, rel=1e-3)

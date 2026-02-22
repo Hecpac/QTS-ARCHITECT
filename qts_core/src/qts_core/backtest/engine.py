@@ -391,6 +391,13 @@ class EventEngine:
             if decision:
                 self._execute(decision, market_data)
 
+                # Re-mark same bar after execution so equity reflects fills/carry.
+                updated_position_value = sum(
+                    qty * prices.get(instrument_id, 0.0)
+                    for instrument_id, qty in self.state.positions.items()
+                )
+                self.state.equity_curve[-1] = self.state.cash + updated_position_value
+
             bars_processed += 1
 
         # Calculate final equity
