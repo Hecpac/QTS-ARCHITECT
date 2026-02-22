@@ -57,6 +57,9 @@ execution_guardrails:
   high_volatility_size_scale: 0.60  # Balanced: was 0.40; less punishing in volatile moves
   max_estimated_slippage_bps: 50.0  # Balanced: was 30; 30 blocked 1h candles with >1.2% range
   slippage_volatility_factor: 0.25
+  high_volatility_hours_utc: [14, 15, 16, 17, 18]  # Deep-dive 50d hotspot window
+  high_volatility_hours_size_scale: 1.0
+  high_volatility_hours_entry_block: true  # Defensive mode: block entries in hotspot hours
 
 trading:
   timeframe: "1h"
