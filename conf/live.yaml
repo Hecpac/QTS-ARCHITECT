@@ -26,10 +26,10 @@ agents:
   strategies:
     - _target_: qts_core.agents.base.TechnicalAgent
       name: TrendFollower_A
-      bullish_threshold: 0.001  # Balanced: was 0.002; confidence≥0.51 at 0.1% move
+      bullish_threshold: 0.015  # Deep-dive 50d: filter noise; trigger only on >=1.5% 1h impulse
     - _target_: qts_core.agents.base.TechnicalAgent
       name: MeanReversion_B
-      bullish_threshold: 0.001  # Balanced: was 0.002
+      bullish_threshold: 0.015  # Keep both technical agents aligned on stronger momentum filter
     - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
       name: ICT_Sniper_NY
       symbol: BTC/USDT
