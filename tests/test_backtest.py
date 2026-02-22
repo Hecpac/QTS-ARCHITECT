@@ -512,6 +512,73 @@ class TestEventEngineExitSemantics:
         assert engine.state.get_position(instrument) == pytest.approx(0.0)
         assert len(engine.trades) == 0
 
+    def test_high_vol_hour_guardrail_blocks_entries(self) -> None:
+        """Entry actions should be blocked when configured high-vol hour matches."""
+        engine = EventEngine(
+            supervisor=object(),
+            config=BacktestConfig(
+                high_volatility_hours_utc=(14, 15, 16, 17, 18),
+                high_volatility_hours_entry_block=True,
+            ),
+        )
+        instrument = InstrumentId("BTC/USDT")
+        decision = TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="blocked by hour guardrail",
+        )
+        market_data = MarketData(
+            instrument_id=instrument,
+            timestamp=datetime(2026, 2, 20, 15, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10.0,
+        )
+
+        initial_cash = engine.state.cash
+        engine._execute(decision, market_data)
+
+        assert engine.state.cash == pytest.approx(initial_cash)
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        assert len(engine.trades) == 0
+
+    def test_high_vol_hour_guardrail_scales_entry_size(self) -> None:
+        """Entry size should be reduced during configured high-volatility hours."""
+        engine = EventEngine(
+            supervisor=object(),
+            config=BacktestConfig(
+                trade_size=10_000.0,
+                high_volatility_hours_utc=(14, 15, 16, 17, 18),
+                high_volatility_hours_size_scale=0.5,
+            ),
+        )
+        instrument = InstrumentId("BTC/USDT")
+        decision = TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="scale by hour guardrail",
+        )
+        market_data = MarketData(
+            instrument_id=instrument,
+            timestamp=datetime(2026, 2, 20, 15, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10.0,
+        )
+
+        engine._execute(decision, market_data)
+
+        assert len(engine.trades) == 1
+        trade = engine.trades[0]
+        assert trade.quantity == pytest.approx(50.0)
+        assert "Backtest guardrail: high-vol hour 15:00 UTC" in trade.rationale
+
     def test_exit_close_short_accrues_borrow_fee(self) -> None:
         """Closing a short should charge accrued borrow/funding carry."""
         engine = EventEngine(

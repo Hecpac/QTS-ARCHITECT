@@ -41,6 +41,9 @@ def apply_execution_guardrails(
     high_volatility_size_scale: float = 0.5,
     max_estimated_slippage_bps: float = 50.0,
     slippage_volatility_factor: float = 0.25,
+    high_volatility_hours_utc: tuple[int, ...] = (),
+    high_volatility_hours_size_scale: float = 1.0,
+    high_volatility_hours_entry_block: bool = False,
 ) -> TradingDecision | None:
     """Apply market microstructure guardrails to a trading decision.
 
@@ -55,6 +58,17 @@ def apply_execution_guardrails(
         return None
 
     if min_volume > 0 and market_data.volume < min_volume:
+        return None
+
+    timestamp_utc = market_data.timestamp
+    if timestamp_utc.tzinfo is None:
+        timestamp_utc = timestamp_utc.replace(tzinfo=timezone.utc)
+    else:
+        timestamp_utc = timestamp_utc.astimezone(timezone.utc)
+
+    hour_utc = timestamp_utc.hour
+    in_high_vol_hour = bool(high_volatility_hours_utc) and hour_utc in high_volatility_hours_utc
+    if in_high_vol_hour and high_volatility_hours_entry_block:
         return None
 
     intrabar_volatility = max(0.0, (market_data.high - market_data.low) / market_data.close)
@@ -74,6 +88,12 @@ def apply_execution_guardrails(
         adjusted_modifier *= max(0.0, high_volatility_size_scale)
         rationale_suffix.append(
             f"Guardrail: high volatility {intrabar_volatility:.2%}"
+        )
+
+    if in_high_vol_hour and high_volatility_hours_size_scale < 1.0:
+        adjusted_modifier *= max(0.0, high_volatility_hours_size_scale)
+        rationale_suffix.append(
+            f"Guardrail: high-vol hour {hour_utc:02d}:00 UTC"
         )
 
     adjusted_modifier = max(0.0, min(1.0, adjusted_modifier))
@@ -189,6 +209,35 @@ class LiveTrader:
         self.guardrails_slippage_volatility_factor: float = float(
             guardrails_cfg.get("slippage_volatility_factor", 0.25)
             if guardrails_cfg else 0.25
+        )
+        raw_high_vol_hours = (
+            guardrails_cfg.get("high_volatility_hours_utc", []) if guardrails_cfg else []
+        )
+        parsed_high_vol_hours: list[int] = []
+        for raw_hour in raw_high_vol_hours:
+            try:
+                hour = int(raw_hour)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= hour <= 23:
+                parsed_high_vol_hours.append(hour)
+
+        self.guardrails_high_volatility_hours_utc: tuple[int, ...] = tuple(
+            sorted(set(parsed_high_vol_hours))
+        )
+        self.guardrails_high_volatility_hours_size_scale: float = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    guardrails_cfg.get("high_volatility_hours_size_scale", 1.0)
+                    if guardrails_cfg else 1.0
+                ),
+            ),
+        )
+        self.guardrails_high_volatility_hours_entry_block: bool = bool(
+            guardrails_cfg.get("high_volatility_hours_entry_block", False)
+            if guardrails_cfg else False
         )
 
         self._last_market_data: MarketData | None = None
@@ -1089,6 +1138,9 @@ class LiveTrader:
                 high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
                 max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
                 slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
+                high_volatility_hours_utc=self.guardrails_high_volatility_hours_utc,
+                high_volatility_hours_size_scale=self.guardrails_high_volatility_hours_size_scale,
+                high_volatility_hours_entry_block=self.guardrails_high_volatility_hours_entry_block,
             )
             if not guarded_decision:
                 log.warning(

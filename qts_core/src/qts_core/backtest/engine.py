@@ -116,6 +116,9 @@ class BacktestConfig(BaseModel):
     short_leverage: float = Field(default=1.0, gt=0)
     short_borrow_rate_bps_per_day: float = Field(default=0.0, ge=0)
     min_short_liquidation_buffer: float = Field(default=0.0, ge=0, le=1)
+    high_volatility_hours_utc: tuple[int, ...] = Field(default_factory=tuple)
+    high_volatility_hours_size_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    high_volatility_hours_entry_block: bool = False
 
 
 class BacktestResult(BaseModel):
@@ -430,9 +433,67 @@ class EventEngine:
             bars_processed=bars_processed,
         )
 
+    def _apply_hour_guardrail(
+        self,
+        decision: TradingDecision,
+        market_data: MarketData,
+    ) -> TradingDecision | None:
+        """Apply optional hour-of-day volatility guardrail to entry actions."""
+        if decision.action not in (SignalType.LONG, SignalType.SHORT):
+            return decision
+
+        if not self.config.high_volatility_hours_utc:
+            return decision
+
+        timestamp_utc = market_data.timestamp
+        if timestamp_utc.tzinfo is None:
+            timestamp_utc = timestamp_utc.replace(tzinfo=timezone.utc)
+        else:
+            timestamp_utc = timestamp_utc.astimezone(timezone.utc)
+
+        hour_utc = timestamp_utc.hour
+        if hour_utc not in self.config.high_volatility_hours_utc:
+            return decision
+
+        if self.config.high_volatility_hours_entry_block:
+            log.warning(
+                "Backtest entry blocked by high-volatility hour guardrail",
+                instrument=decision.instrument_id,
+                hour_utc=hour_utc,
+                action=decision.action,
+            )
+            return None
+
+        if self.config.high_volatility_hours_size_scale >= 1.0:
+            return decision
+
+        adjusted_modifier = max(
+            0.0,
+            min(
+                1.0,
+                decision.quantity_modifier * self.config.high_volatility_hours_size_scale,
+            ),
+        )
+        if adjusted_modifier < DUST_EPS:
+            return None
+
+        return decision.model_copy(
+            update={
+                "quantity_modifier": adjusted_modifier,
+                "rationale": (
+                    f"{decision.rationale} | Backtest guardrail: "
+                    f"high-vol hour {hour_utc:02d}:00 UTC"
+                ),
+            }
+        )
+
     def _execute(self, decision: TradingDecision, market_data: MarketData) -> None:
         """Execute trade based on decision."""
         if decision.action == SignalType.NEUTRAL:
+            return
+
+        decision = self._apply_hour_guardrail(decision, market_data)
+        if decision is None:
             return
 
         # Calculate fill price based on model

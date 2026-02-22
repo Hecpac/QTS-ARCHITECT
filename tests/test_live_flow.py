@@ -252,6 +252,74 @@ def test_guardrails_reduce_size_in_high_volatility():
     assert "Guardrail: high volatility" in guarded.rationale
 
 
+def test_guardrails_reject_entry_in_high_vol_hour_when_block_enabled():
+    instrument = InstrumentId("BTC/USDT")
+    decision = TradingDecision(
+        instrument_id=instrument,
+        action=SignalType.LONG,
+        quantity_modifier=1.0,
+        rationale="test",
+    )
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime(2026, 2, 20, 15, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=5.0,
+    )
+
+    guarded = apply_execution_guardrails(
+        decision,
+        market_data,
+        enabled=True,
+        min_volume=0.1,
+        max_intrabar_volatility=1.0,
+        high_volatility_size_scale=1.0,
+        max_estimated_slippage_bps=1_000.0,
+        high_volatility_hours_utc=(14, 15, 16, 17, 18),
+        high_volatility_hours_entry_block=True,
+    )
+
+    assert guarded is None
+
+
+def test_guardrails_reduce_size_in_high_vol_hour():
+    instrument = InstrumentId("BTC/USDT")
+    decision = TradingDecision(
+        instrument_id=instrument,
+        action=SignalType.LONG,
+        quantity_modifier=0.8,
+        rationale="test",
+    )
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime(2026, 2, 20, 15, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=5.0,
+    )
+
+    guarded = apply_execution_guardrails(
+        decision,
+        market_data,
+        enabled=True,
+        min_volume=0.1,
+        max_intrabar_volatility=1.0,
+        high_volatility_size_scale=1.0,
+        max_estimated_slippage_bps=1_000.0,
+        high_volatility_hours_utc=(14, 15, 16, 17, 18),
+        high_volatility_hours_size_scale=0.5,
+    )
+
+    assert guarded is not None
+    assert guarded.quantity_modifier == pytest.approx(0.4)
+    assert "Guardrail: high-vol hour 15:00 UTC" in guarded.rationale
+
+
 def test_guardrails_reject_high_estimated_slippage():
     instrument = InstrumentId("BTC/USDT")
     decision = TradingDecision(
