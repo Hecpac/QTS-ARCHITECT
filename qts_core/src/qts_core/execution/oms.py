@@ -292,6 +292,9 @@ class Portfolio(BaseModel):
             Positive = long inventory, negative = short inventory.
         blocked_cash: Cash locked for pending orders.
         blocked_positions: Long quantity locked while closing long positions.
+        short_opened_at: Approximate timestamp when net short exposure started.
+        short_borrow_fees_paid: Cumulative borrow/funding fees paid when closing
+            short exposure.
     """
 
     model_config = {"frozen": False}
@@ -309,6 +312,15 @@ class Portfolio(BaseModel):
     blocked_positions: dict[InstrumentId, float] = Field(
         default_factory=dict,
         description="Quantity locked in pending sell orders",
+    )
+    short_opened_at: dict[InstrumentId, datetime] = Field(
+        default_factory=dict,
+        description="InstrumentId -> UTC timestamp when short exposure started",
+    )
+    short_borrow_fees_paid: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Cumulative borrow/funding fees realized on short closes",
     )
 
     @property
@@ -399,6 +411,8 @@ class OrderManagementSystem:
         risk_fraction: float = DEFAULT_RISK_FRACTION,
         account_mode: AccountMode | str = AccountMode.SPOT,
         short_leverage: float = 1.0,
+        short_borrow_rate_bps_per_day: float = 0.0,
+        min_short_liquidation_buffer: float = 0.0,
     ) -> None:
         """Initialize OMS with store and configuration.
 
@@ -408,15 +422,31 @@ class OrderManagementSystem:
             risk_fraction: Maximum fraction of cash to risk per trade.
             account_mode: Trading account mode (spot/margin/perp).
             short_leverage: Effective leverage used for short collateral checks.
+            short_borrow_rate_bps_per_day: Borrow/funding rate in bps/day
+                applied when closing short exposure.
+            min_short_liquidation_buffer: Minimum liquidation distance proxy
+                (approx. 1/leverage) required to allow opening shorts.
 
         Raises:
-            ValueError: If risk_fraction not in (0, 1].
+            ValueError: If configuration values are out of bounds.
         """
         if not 0 < risk_fraction <= 1:
             msg = f"risk_fraction must be in (0, 1], got {risk_fraction}"
             raise ValueError(msg)
         if short_leverage <= 0:
             msg = f"short_leverage must be > 0, got {short_leverage}"
+            raise ValueError(msg)
+        if short_borrow_rate_bps_per_day < 0:
+            msg = (
+                "short_borrow_rate_bps_per_day must be >= 0, "
+                f"got {short_borrow_rate_bps_per_day}"
+            )
+            raise ValueError(msg)
+        if not 0 <= min_short_liquidation_buffer <= 1:
+            msg = (
+                "min_short_liquidation_buffer must be in [0, 1], "
+                f"got {min_short_liquidation_buffer}"
+            )
             raise ValueError(msg)
 
         self.store = store
@@ -426,6 +456,8 @@ class OrderManagementSystem:
             else AccountMode(str(account_mode).lower())
         )
         self.short_leverage = short_leverage
+        self.short_borrow_rate_bps_per_day = short_borrow_rate_bps_per_day
+        self.min_short_liquidation_buffer = min_short_liquidation_buffer
         self.portfolio = self._load_or_init_portfolio(initial_cash)
 
     def _load_or_init_portfolio(self, initial_cash: float) -> Portfolio:
@@ -486,6 +518,50 @@ class OrderManagementSystem:
         """Estimate collateral required to open a short position."""
         notional = quantity * current_price
         return notional / self.short_leverage if self.short_leverage > 0 else notional
+
+    def _estimated_short_liquidation_buffer(self) -> float:
+        """Approximate short liquidation distance proxy from leverage."""
+        if self.short_leverage <= 0:
+            return 0.0
+        return 1.0 / self.short_leverage
+
+    def _estimate_short_borrow_fee(
+        self,
+        instrument_id: InstrumentId,
+        notional: float,
+        asof: datetime,
+    ) -> float:
+        """Estimate carry fee accrued for an existing short position."""
+        if self.short_borrow_rate_bps_per_day <= 0 or notional <= 0:
+            return 0.0
+
+        opened_at = self.portfolio.short_opened_at.get(instrument_id)
+        if opened_at is None:
+            return 0.0
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+
+        elapsed_seconds = max(0.0, (asof - opened_at).total_seconds())
+        elapsed_days = elapsed_seconds / 86_400.0
+        rate_per_day = self.short_borrow_rate_bps_per_day / 10_000.0
+        return notional * rate_per_day * elapsed_days
+
+    def _track_short_position_window(
+        self,
+        instrument_id: InstrumentId,
+        prior_position: float,
+        new_position: float,
+        asof: datetime,
+    ) -> None:
+        """Maintain short exposure start timestamps for borrow fee accounting."""
+        if new_position < -MIN_QUANTITY:
+            started = self.portfolio.short_opened_at.get(instrument_id)
+            if prior_position >= -MIN_QUANTITY or started is None:
+                self.portfolio.short_opened_at[instrument_id] = asof
+            return
+
+        # Flat or long: short window closed.
+        self.portfolio.short_opened_at.pop(instrument_id, None)
 
     def _has_pending_close_order(self, instrument_id: InstrumentId) -> bool:
         """Check whether there is already a pending close order for instrument."""
@@ -559,6 +635,20 @@ class OrderManagementSystem:
 
             side = OrderSide.SELL
             intent = OrderIntent.OPEN_SHORT
+
+            estimated_liquidation_buffer = self._estimated_short_liquidation_buffer()
+            if (
+                self.min_short_liquidation_buffer > 0
+                and estimated_liquidation_buffer < self.min_short_liquidation_buffer
+            ):
+                log.warning(
+                    "Order rejected: short liquidation buffer below minimum",
+                    instrument=decision.instrument_id,
+                    estimated_buffer=estimated_liquidation_buffer,
+                    required_buffer=self.min_short_liquidation_buffer,
+                    short_leverage=self.short_leverage,
+                )
+                return None
 
             collateral = self._short_collateral_required(quantity, current_price)
             if self.portfolio.cash < collateral:
@@ -639,19 +729,27 @@ class OrderManagementSystem:
             # Close short: reserve buyback cash and buy with reduce_only.
             quantity = abs(position)
             buyback_estimate = quantity * current_price
-            if self.portfolio.cash < buyback_estimate:
+            estimated_borrow_fee = self._estimate_short_borrow_fee(
+                decision.instrument_id,
+                buyback_estimate,
+                datetime.now(timezone.utc),
+            )
+            total_cash_required = buyback_estimate + estimated_borrow_fee
+            if self.portfolio.cash < total_cash_required:
                 log.warning(
                     "Exit rejected: insufficient cash to buy back short",
-                    required=buyback_estimate,
+                    required=total_cash_required,
                     available=self.portfolio.cash,
+                    buyback_estimate=buyback_estimate,
+                    estimated_borrow_fee=estimated_borrow_fee,
                 )
                 return None
 
-            self.portfolio.cash -= buyback_estimate
-            self.portfolio.blocked_cash += buyback_estimate
+            self.portfolio.cash -= total_cash_required
+            self.portfolio.blocked_cash += total_cash_required
             side = OrderSide.BUY
             intent = OrderIntent.CLOSE_SHORT
-            reserved_cash = buyback_estimate
+            reserved_cash = total_cash_required
 
         order = Order(
             decision_id=str(decision.decision_id),
@@ -814,7 +912,14 @@ class OrderManagementSystem:
             else fill_price
         )
         reserved_to_release = min(reserved_remaining, reserved_per_unit * fill_qty)
-        actual_cost = (fill_qty * fill_price) + fee
+        borrow_fee = 0.0
+        if order.intent == OrderIntent.CLOSE_SHORT:
+            borrow_fee = self._estimate_short_borrow_fee(
+                order.instrument_id,
+                fill_qty * fill_price,
+                order.updated_at,
+            )
+        actual_cost = (fill_qty * fill_price) + fee + borrow_fee
 
         # Release only the reservation associated with this fill.
         self.portfolio.blocked_cash = max(
@@ -825,6 +930,9 @@ class OrderManagementSystem:
         self.portfolio.cash += reserved_to_release - actual_cost
         order.reserved_cash_remaining = max(0.0, reserved_remaining - reserved_to_release)
 
+        if borrow_fee > 0:
+            self.portfolio.short_borrow_fees_paid += borrow_fee
+
         # On final fill, release any tiny residual reservation (rounding).
         if order.status == OrderStatus.FILLED and (order.reserved_cash_remaining or 0.0) > 0.0:
             residual = order.reserved_cash_remaining or 0.0
@@ -834,7 +942,18 @@ class OrderManagementSystem:
 
         # Add to position
         current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
-        self.portfolio.positions[order.instrument_id] = current_pos + fill_qty
+        new_pos = current_pos + fill_qty
+        if abs(new_pos) <= MIN_QUANTITY:
+            new_pos = 0.0
+        self.portfolio.positions[order.instrument_id] = new_pos
+
+        if order.intent == OrderIntent.CLOSE_SHORT:
+            self._track_short_position_window(
+                order.instrument_id,
+                prior_position=current_pos,
+                new_position=new_pos,
+                asof=order.updated_at,
+            )
 
     def _settle_sell(
         self,
@@ -872,7 +991,16 @@ class OrderManagementSystem:
                 order.reserved_cash_remaining = 0.0
 
             current_pos = self.portfolio.positions.get(order.instrument_id, 0.0)
-            self.portfolio.positions[order.instrument_id] = current_pos - fill_qty
+            new_pos = current_pos - fill_qty
+            if abs(new_pos) <= MIN_QUANTITY:
+                new_pos = 0.0
+            self.portfolio.positions[order.instrument_id] = new_pos
+            self._track_short_position_window(
+                order.instrument_id,
+                prior_position=current_pos,
+                new_position=new_pos,
+                asof=order.updated_at,
+            )
             self.portfolio.cash += proceeds
             return
 

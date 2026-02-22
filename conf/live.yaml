@@ -16,6 +16,8 @@ oms:
   risk_fraction: 0.04
   account_mode: "margin"
   short_leverage: 1.0
+  short_borrow_rate_bps_per_day: 2.0
+  min_short_liquidation_buffer: 0.05
 
 supervisor:
   min_confidence: 0.50  # Balanced: was hardcoded 0.60; lowered to allow TA signals through

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -360,6 +360,30 @@ class TestOrderManagementSystem:
         assert request.intent == OrderIntent.OPEN_SHORT
         assert oms.portfolio.blocked_cash > 0.0
 
+    def test_process_short_decision_rejected_when_liquidation_buffer_too_low(self) -> None:
+        """SHORT should be rejected when leverage implies thin liquidation buffer."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(
+            store,
+            initial_cash=100_000.0,
+            risk_fraction=0.1,
+            account_mode=AccountMode.MARGIN,
+            short_leverage=25.0,
+            min_short_liquidation_buffer=0.10,
+        )
+
+        decision = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.SHORT,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Test liquidation guard",
+        )
+
+        request = oms.process_decision(decision, current_price=50_000.0)
+        assert request is None
+
     def test_process_short_decision_rejected_in_spot_mode(self) -> None:
         """SHORT should be rejected in spot mode."""
         store = MemoryStore()
@@ -477,6 +501,69 @@ class TestOrderManagementSystem:
         assert request.side == OrderSide.BUY
         assert request.intent == OrderIntent.CLOSE_SHORT
         assert request.reduce_only is True
+
+    def test_close_short_applies_borrow_fee(self) -> None:
+        """Closing shorts should charge accrued borrow/funding carry."""
+        store = MemoryStore()
+        oms = OrderManagementSystem(
+            store,
+            initial_cash=100_000.0,
+            risk_fraction=0.1,
+            account_mode=AccountMode.MARGIN,
+            short_borrow_rate_bps_per_day=100.0,
+        )
+
+        open_short = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.SHORT,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Open short for borrow fee test",
+        )
+
+        open_request = oms.process_decision(open_short, current_price=50_000.0)
+        assert open_request is not None
+        oms.confirm_execution(
+            open_request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=open_request.quantity,
+            fee=0.0,
+            exchange_trade_id="short-open-borrow",
+        )
+
+        assert oms.portfolio.positions["BTC/USDT"] < 0
+
+        # Simulate position held for 2 days before close.
+        opened_at = datetime.now(timezone.utc)
+        oms.portfolio.short_opened_at["BTC/USDT"] = opened_at - timedelta(days=2)
+
+        close_short = TradingDecision(
+            decision_id=uuid.uuid4(),
+            instrument_id="BTC/USDT",
+            action=SignalType.EXIT,
+            confidence=0.8,
+            quantity_modifier=1.0,
+            rationale="Close short with borrow fee",
+        )
+
+        close_request = oms.process_decision(close_short, current_price=50_000.0)
+        assert close_request is not None
+        assert close_request.intent == OrderIntent.CLOSE_SHORT
+
+        oms.confirm_execution(
+            close_request.oms_order_id,
+            fill_price=50_000.0,
+            fill_qty=close_request.quantity,
+            fee=0.0,
+            exchange_trade_id="short-close-borrow",
+        )
+
+        # Notional=10,000 and rate=1%/day over 2 days => 200 fee.
+        assert oms.portfolio.short_borrow_fees_paid == pytest.approx(200.0, rel=1e-2)
+        assert oms.portfolio.cash == pytest.approx(99_800.0, rel=1e-3)
+        assert oms.portfolio.positions["BTC/USDT"] == pytest.approx(0.0)
+        assert "BTC/USDT" not in oms.portfolio.short_opened_at
 
     def test_confirm_buy_partial_execution_is_incremental(self) -> None:
         """Partial buy fills should release reservations incrementally."""
