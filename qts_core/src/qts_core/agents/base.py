@@ -150,8 +150,9 @@ class BaseRiskAgent:
 
     Attributes:
         name: Unique agent identifier.
-        max_position_size: Maximum position as fraction of portfolio.
+        max_position_size: Maximum gross exposure as fraction of portfolio.
         max_daily_loss: Maximum allowed daily loss percentage.
+        max_short_exposure: Optional cap for gross short exposure fraction.
     """
 
     def __init__(
@@ -159,17 +160,20 @@ class BaseRiskAgent:
         name: str,
         max_position_size: float = 0.10,
         max_daily_loss: float = 0.02,
+        max_short_exposure: float | None = None,
     ) -> None:
         """Initialize risk agent.
 
         Args:
             name: Agent identifier.
-            max_position_size: Max position size (0-1).
+            max_position_size: Max gross exposure (0-1).
             max_daily_loss: Max daily loss as fraction (e.g., 0.02 = 2%).
+            max_short_exposure: Optional max gross short exposure (0-1).
         """
         self.name = name
         self.max_position_size = max_position_size
         self.max_daily_loss = max_daily_loss
+        self.max_short_exposure = max_short_exposure
 
     async def evaluate(self, request: ReviewRequest) -> RiskVerdict:
         """Evaluate a trading request.
@@ -202,6 +206,24 @@ class BaseRiskAgent:
                 risk_metrics={
                     "daily_pnl_fraction": request.daily_pnl_fraction,
                     "max_daily_loss": self.max_daily_loss,
+                },
+            )
+
+        # Check directional short cap before generic exposure gate.
+        if (
+            request.proposed_signal.signal_type == SignalType.SHORT
+            and self.max_short_exposure is not None
+            and request.short_exposure_fraction >= self.max_short_exposure
+        ):
+            return RiskVerdict(
+                status=RiskStatus.REJECTED,
+                reason=(
+                    "Short exposure cap reached "
+                    f"({request.short_exposure_fraction:.1%} >= {self.max_short_exposure:.1%})"
+                ),
+                risk_metrics={
+                    "short_exposure_fraction": request.short_exposure_fraction,
+                    "max_short_exposure": self.max_short_exposure,
                 },
             )
 
@@ -313,19 +335,22 @@ class StrictRiskAgent(BaseRiskAgent):
         min_signal_confidence: float = 0.7,
         max_position_size: float = 0.10,
         max_daily_loss: float = 0.02,
+        max_short_exposure: float | None = None,
     ) -> None:
         """Initialize StrictRiskAgent.
 
         Args:
             name: Agent identifier.
             min_signal_confidence: Minimum signal confidence to approve.
-            max_position_size: Maximum position size fraction.
+            max_position_size: Maximum gross exposure fraction.
             max_daily_loss: Maximum daily loss fraction.
+            max_short_exposure: Optional cap for gross short exposure.
         """
         super().__init__(
             name=name,
             max_position_size=max_position_size,
             max_daily_loss=max_daily_loss,
+            max_short_exposure=max_short_exposure,
         )
         self.min_signal_confidence = min_signal_confidence
 
@@ -356,6 +381,7 @@ class StrictRiskAgent(BaseRiskAgent):
             risk_metrics={
                 "signal_confidence": request.proposed_signal.confidence,
                 "exposure": request.portfolio_exposure,
+                "short_exposure": request.short_exposure_fraction,
             },
         )
 

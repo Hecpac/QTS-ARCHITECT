@@ -132,9 +132,11 @@ class ReviewRequest(BaseModel):
         proposed_signal: The signal to be reviewed.
         instrument_id: Target instrument.
         current_price: Latest market price.
-        portfolio_exposure: Current exposure to this instrument.
+        portfolio_exposure: Current gross exposure as fraction of portfolio value.
         daily_pnl_fraction: Session/day PnL as fraction of start-of-day value.
             Negative values indicate losses (e.g., -0.02 = -2%).
+        short_exposure_fraction: Current gross short notional as fraction of
+            portfolio value.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -153,6 +155,10 @@ class ReviewRequest(BaseModel):
     daily_pnl_fraction: float = Field(
         default=0.0,
         description="Session/day PnL fraction from start-of-day portfolio value",
+    )
+    short_exposure_fraction: float = Field(
+        default=0.0,
+        description="Current short notional as fraction of portfolio value",
     )
 
 

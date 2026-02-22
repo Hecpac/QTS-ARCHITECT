@@ -790,6 +790,28 @@ def test_portfolio_exposure_includes_blocked_and_multi_instrument_positions() ->
     assert exposure == pytest.approx(200.0 / total_value)
 
 
+def test_short_exposure_fraction_counts_only_short_notional() -> None:
+    trader = _build_live_trader()
+
+    btc = InstrumentId("BTC/USDT")
+    eth = InstrumentId("ETH/USDT")
+
+    trader.oms.portfolio.positions[btc] = -1.5
+    trader.oms.portfolio.positions[eth] = 2.0
+
+    trader._instrument_marks[btc] = 100.0
+    trader._instrument_marks[eth] = 50.0
+
+    total_value = trader._compute_total_value(default_mark=100.0)
+    short_exposure = trader._compute_short_exposure_fraction(
+        default_mark=100.0,
+        total_value=total_value,
+    )
+
+    # Short notional = abs(-1.5 * 100) = 150. Long leg must not contribute.
+    assert short_exposure == pytest.approx(150.0 / total_value)
+
+
 def test_session_drawdown_limit_detection() -> None:
     trader = _build_live_trader()
     trader.max_session_drawdown = 0.10

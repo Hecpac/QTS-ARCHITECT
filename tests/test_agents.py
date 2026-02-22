@@ -337,6 +337,36 @@ class TestRiskAgents:
         assert "Daily loss limit breached" in verdict.reason
 
     @pytest.mark.asyncio
+    async def test_strict_agent_rejects_short_exposure_cap_breach(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """StrictRiskAgent should reject additional shorts above cap."""
+        agent = StrictRiskAgent(
+            name="strict_risk",
+            min_signal_confidence=0.7,
+            max_short_exposure=0.15,
+        )
+
+        signal = AgentSignal(
+            source_agent="test",
+            signal_type=SignalType.SHORT,
+            confidence=0.9,
+        )
+
+        request = ReviewRequest(
+            proposed_signal=signal,
+            instrument_id=instrument_id,
+            current_price=100.0,
+            short_exposure_fraction=0.18,
+        )
+
+        verdict = await agent.evaluate(request)
+
+        assert verdict.status == RiskStatus.REJECTED
+        assert "Short exposure cap reached" in verdict.reason
+
+    @pytest.mark.asyncio
     async def test_permissive_agent_approves_all(
         self,
         instrument_id: InstrumentId,

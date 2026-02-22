@@ -112,6 +112,7 @@ class Supervisor:
         ohlcv_history: list[OHLCVTuple] | None = None,
         portfolio_exposure: float = 0.0,
         daily_pnl_fraction: float = 0.0,
+        short_exposure_fraction: float = 0.0,
     ) -> TradingDecision | None:
         """Execute one decision cycle.
 
@@ -121,8 +122,10 @@ class Supervisor:
         Args:
             market_data: Current market event (OHLCV bar).
             ohlcv_history: Optional OHLCV history for agents.
-            portfolio_exposure: Current position as fraction of portfolio.
+            portfolio_exposure: Current gross exposure as fraction of portfolio.
             daily_pnl_fraction: Session/day PnL fraction from start-of-day value.
+            short_exposure_fraction: Current gross short notional as fraction
+                of portfolio value.
 
         Returns:
             TradingDecision if trade approved, None otherwise.
@@ -213,6 +216,7 @@ class Supervisor:
             current_price=current_price,
             portfolio_exposure=portfolio_exposure,
             daily_pnl_fraction=daily_pnl_fraction,
+            short_exposure_fraction=short_exposure_fraction,
         )
 
         verdict = await self.risk_agent.evaluate(review_request)

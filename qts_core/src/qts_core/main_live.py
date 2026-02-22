@@ -645,6 +645,25 @@ class LiveTrader:
 
         return gross_notional / total_value
 
+    def _compute_short_exposure_fraction(
+        self,
+        default_mark: float,
+        total_value: float,
+    ) -> float:
+        if total_value <= 0:
+            return 0.0
+
+        short_notional = 0.0
+        instruments = set(self.oms.portfolio.positions) | set(self.oms.portfolio.blocked_positions)
+        for instrument_id in instruments:
+            qty = self._effective_position_qty(instrument_id)
+            if qty >= -1e-8:
+                continue
+            mark = self._mark_for_instrument(instrument_id, default_mark)
+            short_notional += abs(qty * mark)
+
+        return short_notional / total_value
+
     def _compute_daily_pnl_fraction(
         self,
         total_value: float,
@@ -979,6 +998,10 @@ class LiveTrader:
             market_data.close,
             total_value,
         )
+        short_exposure_fraction = self._compute_short_exposure_fraction(
+            market_data.close,
+            total_value,
+        )
 
         session_drawdown = self._compute_session_drawdown_fraction(total_value)
         if (
@@ -1024,6 +1047,7 @@ class LiveTrader:
                     ohlcv_history=self._last_ohlcv_history,
                     portfolio_exposure=portfolio_exposure,
                     daily_pnl_fraction=daily_pnl_fraction,
+                    short_exposure_fraction=short_exposure_fraction,
                 )
             except Exception as exc:
                 self._publish_latency_metrics(
