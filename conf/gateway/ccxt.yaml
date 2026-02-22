@@ -1,7 +1,7 @@
 _target_: qts_core.execution.ems.CCXTGateway
-exchange_name: "okx"
+exchange_name: "kraken"
 sandbox: false
-apiKey: ""
-secret: ""
+apiKey: "${oc.env:KRAKEN_API_KEY,}"
+secret: "${oc.env:KRAKEN_API_SECRET,}"
 paper_trading: true
-account_mode: "spot"
+account_mode: "margin"
