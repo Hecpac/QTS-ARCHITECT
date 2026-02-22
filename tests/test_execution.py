@@ -977,6 +977,26 @@ class TestCCXTGatewayPayload:
         *_head, params = gateway._build_create_order_payload(order)
         assert params.get("reduceOnly") is True
 
+    def test_reduce_only_param_enabled_for_perp(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.PERP,
+        )
+
+        order = OrderRequest(
+            oms_order_id="test-1b",
+            instrument_id="BTC/USDT",
+            side=OrderSide.BUY,
+            intent=OrderIntent.CLOSE_SHORT,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+            reduce_only=True,
+        )
+
+        *_head, params = gateway._build_create_order_payload(order)
+        assert params.get("reduceOnly") is True
+
     def test_reduce_only_param_not_set_for_spot(self) -> None:
         gateway = CCXTGateway(
             exchange_name="kraken",
