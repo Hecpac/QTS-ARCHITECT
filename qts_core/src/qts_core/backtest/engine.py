@@ -113,6 +113,9 @@ class BacktestConfig(BaseModel):
     allow_shorting: bool = True
     max_position_size: float | None = None  # None = unlimited
     risk_fraction: float = Field(default=0.1, gt=0, le=1)
+    short_leverage: float = Field(default=1.0, gt=0)
+    short_borrow_rate_bps_per_day: float = Field(default=0.0, ge=0)
+    min_short_liquidation_buffer: float = Field(default=0.0, ge=0, le=1)
 
 
 class BacktestResult(BaseModel):
@@ -152,6 +155,8 @@ class PortfolioState:
     positions: dict[InstrumentId, float] = field(default_factory=dict)
     equity_curve: list[float] = field(default_factory=list)
     timestamps: list[datetime] = field(default_factory=list)
+    short_opened_at: dict[InstrumentId, datetime] = field(default_factory=dict)
+    short_borrow_fees_paid: float = 0.0
 
     def get_position(self, instrument_id: InstrumentId) -> float:
         """Get position quantity (0 if not held)."""
@@ -257,6 +262,50 @@ class EventEngine:
             for t in self.trades
         ]
 
+    def _estimated_short_liquidation_buffer(self) -> float:
+        """Approximate short liquidation distance proxy from configured leverage."""
+        if self.config.short_leverage <= 0:
+            return 0.0
+        return 1.0 / self.config.short_leverage
+
+    def _estimate_short_borrow_fee(
+        self,
+        instrument_id: InstrumentId,
+        notional: float,
+        asof: datetime,
+    ) -> float:
+        """Estimate carry fee accrued for an open short position."""
+        if self.config.short_borrow_rate_bps_per_day <= 0 or notional <= 0:
+            return 0.0
+
+        opened_at = self.state.short_opened_at.get(instrument_id)
+        if opened_at is None:
+            return 0.0
+
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+
+        elapsed_seconds = max(0.0, (asof - opened_at).total_seconds())
+        elapsed_days = elapsed_seconds / 86_400.0
+        rate_per_day = self.config.short_borrow_rate_bps_per_day / 10_000.0
+        return notional * rate_per_day * elapsed_days
+
+    def _track_short_position_window(
+        self,
+        instrument_id: InstrumentId,
+        prior_position: float,
+        new_position: float,
+        asof: datetime,
+    ) -> None:
+        """Track short exposure windows for borrow/funding accounting."""
+        if new_position < -DUST_EPS:
+            started = self.state.short_opened_at.get(instrument_id)
+            if prior_position >= -DUST_EPS or started is None:
+                self.state.short_opened_at[instrument_id] = asof
+            return
+
+        self.state.short_opened_at.pop(instrument_id, None)
+
     async def run(self, data_feed: pl.DataFrame) -> BacktestResult:
         """Run backtest simulation.
 
@@ -324,13 +373,18 @@ class EventEngine:
             # Approximate exposure for risk layer
             position_qty = self.state.get_position(market_data.instrument_id)
             position_value = abs(position_qty * market_data.close)
+            short_position_value = abs(min(position_qty, 0.0) * market_data.close)
             portfolio_exposure = (position_value / equity) if equity > 0 else 0.0
+            short_exposure_fraction = (
+                (short_position_value / equity) if equity > 0 else 0.0
+            )
 
             # Agent decision
             decision = await self.supervisor.run(
                 market_data,
                 ohlcv_history=list(history),
                 portfolio_exposure=portfolio_exposure,
+                short_exposure_fraction=short_exposure_fraction,
             )
 
             # Execute
@@ -397,6 +451,20 @@ class EventEngine:
                 slippage,
             )
         elif decision.action == SignalType.SHORT:
+            estimated_buffer = self._estimated_short_liquidation_buffer()
+            if (
+                self.config.min_short_liquidation_buffer > 0
+                and estimated_buffer < self.config.min_short_liquidation_buffer
+            ):
+                log.warning(
+                    "Backtest short rejected: liquidation buffer below minimum",
+                    estimated_buffer=estimated_buffer,
+                    required_buffer=self.config.min_short_liquidation_buffer,
+                    short_leverage=self.config.short_leverage,
+                    instrument=decision.instrument_id,
+                )
+                return
+
             self._execute_sell(
                 decision,
                 market_data,
@@ -436,7 +504,15 @@ class EventEngine:
         slippage: float,
     ) -> None:
         """Execute buy order."""
-        cost = (quantity * price) + commission + slippage
+        prior_position = self.state.get_position(decision.instrument_id)
+        short_cover_qty = min(quantity, abs(min(prior_position, 0.0)))
+        borrow_fee = self._estimate_short_borrow_fee(
+            decision.instrument_id,
+            short_cover_qty * price,
+            market_data.timestamp,
+        )
+
+        cost = (quantity * price) + commission + slippage + borrow_fee
 
         if self.state.cash < cost:
             log.warning(
@@ -450,6 +526,17 @@ class EventEngine:
         self.state.cash -= cost
         self.state.update_position(decision.instrument_id, quantity)
 
+        new_position = self.state.get_position(decision.instrument_id)
+        self._track_short_position_window(
+            decision.instrument_id,
+            prior_position=prior_position,
+            new_position=new_position,
+            asof=market_data.timestamp,
+        )
+
+        if borrow_fee > 0:
+            self.state.short_borrow_fees_paid += borrow_fee
+
         # Record trade
         self._record_trade(
             decision,
@@ -457,7 +544,7 @@ class EventEngine:
             TradeSide.BUY,
             quantity,
             price,
-            commission,
+            commission + borrow_fee,
             slippage,
         )
 
@@ -471,16 +558,16 @@ class EventEngine:
         slippage: float,
     ) -> None:
         """Execute sell order."""
-        current_position = self.state.get_position(decision.instrument_id)
+        prior_position = self.state.get_position(decision.instrument_id)
 
         # Check shorting rules
-        if not self.config.allow_shorting and current_position < quantity:
+        if not self.config.allow_shorting and prior_position < quantity:
             log.warning(
                 "Shorting not allowed",
-                position=current_position,
+                position=prior_position,
                 requested=quantity,
             )
-            quantity = max(0, current_position)  # Sell only what we have
+            quantity = max(0, prior_position)  # Sell only what we have
             if quantity == 0:
                 return
 
@@ -489,6 +576,14 @@ class EventEngine:
         # Update state
         self.state.cash += proceeds
         self.state.update_position(decision.instrument_id, -quantity)
+
+        new_position = self.state.get_position(decision.instrument_id)
+        self._track_short_position_window(
+            decision.instrument_id,
+            prior_position=prior_position,
+            new_position=new_position,
+            asof=market_data.timestamp,
+        )
 
         # Record trade
         self._record_trade(

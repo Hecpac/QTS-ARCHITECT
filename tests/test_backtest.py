@@ -9,7 +9,7 @@ Tests cover:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import polars as pl
@@ -451,3 +451,74 @@ class TestEventEngineExitSemantics:
         assert engine.state.get_position(instrument) == pytest.approx(0.0)
         # Buy-to-cover should consume cash.
         assert engine.state.cash < initial_cash
+
+    def test_short_entry_rejected_when_liquidation_buffer_too_low(self) -> None:
+        """SHORT entry should be blocked when leverage implies thin buffer."""
+        engine = EventEngine(
+            supervisor=object(),
+            config=BacktestConfig(
+                min_short_liquidation_buffer=0.10,
+                short_leverage=25.0,
+            ),
+        )
+        instrument = InstrumentId("BTC/USDT")
+
+        decision = TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.SHORT,
+            quantity_modifier=1.0,
+            rationale="open short blocked by guard",
+        )
+        market_data = MarketData(
+            instrument_id=instrument,
+            timestamp=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10.0,
+        )
+
+        initial_cash = engine.state.cash
+        engine._execute(decision, market_data)
+
+        assert engine.state.cash == pytest.approx(initial_cash)
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        assert len(engine.trades) == 0
+
+    def test_exit_close_short_accrues_borrow_fee(self) -> None:
+        """Closing a short should charge accrued borrow/funding carry."""
+        engine = EventEngine(
+            supervisor=object(),
+            config=BacktestConfig(short_borrow_rate_bps_per_day=100.0),
+        )
+        instrument = InstrumentId("BTC/USDT")
+
+        now = datetime.now(timezone.utc)
+        engine.state.positions[instrument] = -1.0
+        engine.state.short_opened_at[instrument] = now - timedelta(days=2)
+        initial_cash = engine.state.cash
+
+        decision = TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.EXIT,
+            quantity_modifier=1.0,
+            rationale="close short with carry",
+        )
+        market_data = MarketData(
+            instrument_id=instrument,
+            timestamp=now,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10.0,
+        )
+
+        engine._execute(decision, market_data)
+
+        # Buyback cost: 100 + carry 2 (1%/day * 2 days).
+        assert engine.state.cash == pytest.approx(initial_cash - 102.0, rel=1e-3)
+        assert engine.state.short_borrow_fees_paid == pytest.approx(2.0, rel=1e-2)
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        assert instrument not in engine.state.short_opened_at
