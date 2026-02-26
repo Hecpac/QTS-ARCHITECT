@@ -1,0 +1,52 @@
+{
+  "generated_at_utc": "2026-02-26T20:34:16.368908+00:00",
+  "exchange": "coinbase",
+  "requested_symbol": "XAUUSD",
+  "selected_symbol": "PAXG/USD",
+  "selection_note": "XAUUSD not listed on Coinbase; using PAXG/USD proxy",
+  "market_type": "spot",
+  "taker_fee": 0.012,
+  "commission_bps_used": 120.0,
+  "coverage": {
+    "365d_1h": {
+      "bars": 6050,
+      "expected": 8760,
+      "coverage": 0.6906392694063926,
+      "start": "2025-05-08 18:00:00+00:00",
+      "end": "2026-02-26 20:00:00+00:00",
+      "mean_volume": 17.35780085289256
+    },
+    "90d_15m": {
+      "bars": 7464,
+      "expected": 8640,
+      "coverage": 0.8638888888888889,
+      "start": "2025-11-28 20:45:00+00:00",
+      "end": "2026-02-26 20:30:00+00:00",
+      "mean_volume": 9.266052367363343
+    }
+  },
+  "results": [
+    {
+      "case": "365d_1h",
+      "bars": 6050,
+      "trades": 305,
+      "final_capital": 69871.55883791478,
+      "pnl": -30128.44116208522,
+      "annualized_return": -0.4049957730124677,
+      "sharpe": -11.731554817224387,
+      "max_drawdown": -0.3013838443201998,
+      "borrow_fees_paid": 348.2802978554635
+    },
+    {
+      "case": "90d_15m",
+      "bars": 7464,
+      "trades": 194,
+      "final_capital": 78307.43781554126,
+      "pnl": -21692.562184458744,
+      "annualized_return": -0.6827600572508539,
+      "sharpe": -19.841696051008807,
+      "max_drawdown": -0.21723168518123215,
+      "borrow_fees_paid": 126.6338891327403
+    }
+  ]
+}
