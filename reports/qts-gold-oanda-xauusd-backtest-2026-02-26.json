@@ -1,0 +1,53 @@
+{
+  "generated_at_utc": "2026-02-26T21:15:55.300669+00:00",
+  "provider": "oanda_practice",
+  "instrument": "XAU_USD",
+  "strategy_mode": "ny_8_11_breakout_plus_fvg",
+  "assumptions": {
+    "commission_bps": 5.0,
+    "slippage_bps": 5.0,
+    "borrow_bps_day": 2.0
+  },
+  "coverage": {
+    "365d_1h": {
+      "bars": 5914,
+      "expected": 8760,
+      "coverage": 0.6751141552511416,
+      "start": "2025-02-26 23:00:00+00:00",
+      "end": "2026-02-26 20:00:00+00:00",
+      "mean_volume": 28173.88366587758
+    },
+    "90d_15m": {
+      "bars": 5667,
+      "expected": 8640,
+      "coverage": 0.6559027777777777,
+      "start": "2025-11-30 23:00:00+00:00",
+      "end": "2026-02-26 21:00:00+00:00",
+      "mean_volume": 11362.562731604023
+    }
+  },
+  "results": [
+    {
+      "case": "365d_1h",
+      "bars": 5914,
+      "trades": 280,
+      "final_capital": 94040.34326338545,
+      "pnl": -5959.656736614546,
+      "annualized_return": -0.08701111584485555,
+      "sharpe": -2.7740974927219604,
+      "max_drawdown": -0.06304036035225924,
+      "borrow_fees_paid": 506.7142994741316
+    },
+    {
+      "case": "90d_15m",
+      "bars": 5667,
+      "trades": 145,
+      "final_capital": 97847.28525622094,
+      "pnl": -2152.7147437790554,
+      "annualized_return": -0.12591990230090244,
+      "sharpe": -2.444863236057531,
+      "max_drawdown": -0.028244431868301147,
+      "borrow_fees_paid": 118.03978432949512
+    }
+  ]
+}
