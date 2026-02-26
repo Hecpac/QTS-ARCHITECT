@@ -1,0 +1,38 @@
+{
+  "generated_at_utc": "2026-02-26T19:57:29.785807+00:00",
+  "session": {
+    "start_local_hour": 8,
+    "end_local_hour": 11,
+    "timezone": "America/New_York"
+  },
+  "results": [
+    {
+      "name": "gold_1y_1h_ny_8_11",
+      "bars": 8760,
+      "start": "2025-02-26T20:00:00+00:00",
+      "end": "2026-02-26T19:00:00+00:00",
+      "trades": 3,
+      "final_capital": 84805.77118253853,
+      "pnl": -15194.228817461466,
+      "total_return": -0.1519422881746194,
+      "annualized_return": -0.15195824481167486,
+      "sharpe": -2.3932235106995217,
+      "max_drawdown": -0.15374345927650135,
+      "borrow_fees_paid": 2129.1454412712737
+    },
+    {
+      "name": "gold_90d_15m_ny_8_11",
+      "bars": 8640,
+      "start": "2025-11-28T20:00:00+00:00",
+      "end": "2026-02-26T19:45:00+00:00",
+      "trades": 3,
+      "final_capital": 96071.6939301498,
+      "pnl": -3928.306069850194,
+      "total_return": -0.03928306069850007,
+      "annualized_return": -0.15002392226673344,
+      "sharpe": -2.534085772743335,
+      "max_drawdown": -0.05471412264452797,
+      "borrow_fees_paid": 344.5601812851415
+    }
+  ]
+}

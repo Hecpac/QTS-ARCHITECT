@@ -198,6 +198,51 @@ class TestICTSmartMoneyAgent:
         assert signal is None
 
     @pytest.mark.asyncio
+    async def test_kill_zone_respects_new_york_timezone_with_dst(
+        self,
+        instrument_id: InstrumentId,
+        bullish_ohlcv_history: list,
+    ) -> None:
+        """08:00-11:00 NY session should map to different UTC hours across DST."""
+        agent = ICTSmartMoneyAgent(
+            name="ict_test",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+        )
+
+        # Winter (EST, UTC-5): 08:00 NY -> 13:00 UTC
+        ts_winter_inside = datetime(2024, 1, 15, 13, 0, 0, tzinfo=timezone.utc)
+        signal_winter = await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=109.0,
+            timestamp=ts_winter_inside,
+            ohlcv_history=bullish_ohlcv_history,
+        )
+        assert signal_winter is not None
+
+        # Summer (EDT, UTC-4): 08:00 NY -> 12:00 UTC
+        ts_summer_inside = datetime(2024, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+        signal_summer = await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=109.0,
+            timestamp=ts_summer_inside,
+            ohlcv_history=bullish_ohlcv_history,
+        )
+        assert signal_summer is not None
+
+        # Summer outside: 11:30 NY -> outside [08,11)
+        ts_summer_outside = datetime(2024, 7, 15, 15, 30, 0, tzinfo=timezone.utc)
+        signal_outside = await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=109.0,
+            timestamp=ts_summer_outside,
+            ohlcv_history=bullish_ohlcv_history,
+        )
+        assert signal_outside is None
+
+    @pytest.mark.asyncio
     async def test_no_signal_on_symbol_mismatch(
         self,
         timestamp: datetime,

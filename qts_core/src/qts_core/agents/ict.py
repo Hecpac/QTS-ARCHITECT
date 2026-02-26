@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
@@ -51,15 +52,16 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
     Detects Fair Value Gaps (FVG) during kill zone sessions.
     FVG represents institutional order flow imbalances.
 
-    Kill Zones (UTC):
-    - London Open: 07:00-10:00
-    - NY Open: 13:00-16:00 (default)
-    - London Close: 15:00-17:00
+    Kill Zones (timezone-aware):
+    - Configure hours in local session timezone (default: UTC).
+    - Example NY open all-year local time: 08:00-11:00 with
+      session_timezone="America/New_York" (DST-adjusted automatically).
 
     Attributes:
         symbol: Target trading pair.
-        session_start: Kill zone start hour (UTC).
-        session_end: Kill zone end hour (UTC).
+        session_start: Kill zone start hour in session timezone.
+        session_end: Kill zone end hour in session timezone.
+        session_timezone: IANA timezone for session window evaluation.
         min_fvg_size: Minimum FVG size as percentage of price.
         base_confidence: Base confidence for FVG signals.
     """
@@ -73,6 +75,7 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         symbol: str,
         session_start: int = 13,
         session_end: int = 16,
+        session_timezone: str = "UTC",
         min_fvg_size: float = 0.001,
         base_confidence: float = 0.80,
         priority: AgentPriority = AgentPriority.HIGH,
@@ -83,8 +86,9 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         Args:
             name: Agent identifier.
             symbol: Trading pair (e.g., "BTC/USDT").
-            session_start: Kill zone start hour (0-23, UTC).
-            session_end: Kill zone end hour (0-23, UTC).
+            session_start: Kill zone start hour (0-23) in session timezone.
+            session_end: Kill zone end hour (0-23) in session timezone.
+            session_timezone: IANA timezone name (e.g., "UTC", "America/New_York").
             min_fvg_size: Minimum FVG size as fraction (0.001 = 0.1%).
             base_confidence: Base confidence level for signals.
             priority: Signal priority.
@@ -94,6 +98,17 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         self.symbol = symbol
         self.session_start = session_start
         self.session_end = session_end
+        self.session_timezone = session_timezone
+        try:
+            self._session_tz = ZoneInfo(session_timezone)
+        except ZoneInfoNotFoundError:
+            log.warning(
+                "Invalid ICT session timezone; falling back to UTC",
+                agent=name,
+                session_timezone=session_timezone,
+            )
+            self.session_timezone = "UTC"
+            self._session_tz = timezone.utc
         self.min_fvg_size = min_fvg_size
         self.base_confidence = base_confidence
 
@@ -101,21 +116,24 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         self._history: deque[OHLCVTuple] = deque(maxlen=self.MIN_CANDLES)
 
     def _is_in_kill_zone(self, ts: datetime) -> bool:
-        """Check if timestamp falls within the kill zone.
-
-        Args:
-            ts: Timestamp to check.
-
-        Returns:
-            True if within kill zone hours.
-        """
-        # Ensure timezone awareness
+        """Check if timestamp falls within configured kill-zone window."""
+        # Ensure timezone awareness first (assume UTC when naive).
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        else:
-            ts = ts.astimezone(timezone.utc)
 
-        return self.session_start <= ts.hour < self.session_end
+        local_ts = ts.astimezone(self._session_tz)
+        hour = local_ts.hour
+
+        # Standard window (e.g., 08-11).
+        if self.session_start < self.session_end:
+            return self.session_start <= hour < self.session_end
+
+        # Overnight window (e.g., 22-02).
+        if self.session_start > self.session_end:
+            return hour >= self.session_start or hour < self.session_end
+
+        # Start == end means disabled/full-day ambiguity; keep conservative.
+        return False
 
     def _detect_fvg(self, candles: list[OHLCVTuple]) -> FVGResult:
         """Detect Fair Value Gap in the last 3 candles.
@@ -213,11 +231,17 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             return None
 
         # Only trade during kill zones
+        local_ts = timestamp
+        if local_ts.tzinfo is None:
+            local_ts = local_ts.replace(tzinfo=timezone.utc)
+        local_ts = local_ts.astimezone(self._session_tz)
+
         if not self._is_in_kill_zone(timestamp):
             log.debug(
                 "Outside kill zone",
                 agent=self.name,
-                hour=timestamp.hour,
+                hour_local=local_ts.hour,
+                session_timezone=self.session_timezone,
                 kill_zone=f"{self.session_start}-{self.session_end}",
             )
             return None
@@ -268,7 +292,10 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
                 "pattern": fvg.pattern_name,
                 "gap_size_pct": fvg.gap_size * 100,
                 "kill_zone": True,
-                "session": f"{self.session_start:02d}:00-{self.session_end:02d}:00 UTC",
+                "session": (
+                    f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                    f"{self.session_timezone}"
+                ),
                 "symbol": self.symbol,
             },
         )
