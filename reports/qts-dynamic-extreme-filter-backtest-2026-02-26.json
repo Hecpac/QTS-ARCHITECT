@@ -1,0 +1,89 @@
+{
+  "generated_at_utc": "2026-02-26T18:39:00.841170+00:00",
+  "rows": [
+    {
+      "name": "baseline_no_guard",
+      "bars": 8760,
+      "trades": 4,
+      "guarded_trades": 0,
+      "final_capital": 102834.69119299992,
+      "pnl": 2834.6911929999187,
+      "total_return": 0.028889712290087743,
+      "annualized_return": 0.028893057775428055,
+      "sharpe": 0.31104167367077806,
+      "max_drawdown": -0.12916624930206566,
+      "borrow_fees_paid": 1255.023005333596,
+      "window": "1y_okx"
+    },
+    {
+      "name": "dynamic_extreme_scale_z2.5",
+      "bars": 8760,
+      "trades": 5,
+      "guarded_trades": 1,
+      "final_capital": 101697.03815762544,
+      "pnl": 1697.038157625444,
+      "total_return": 0.017507176973708294,
+      "annualized_return": 0.017509193135200496,
+      "sharpe": 0.21427992473465612,
+      "max_drawdown": -0.12188315442005028,
+      "borrow_fees_paid": 1738.6089575910796,
+      "window": "1y_okx"
+    },
+    {
+      "name": "dynamic_extreme_block_z2.5",
+      "bars": 8760,
+      "trades": 11,
+      "guarded_trades": 0,
+      "final_capital": 104285.68735583434,
+      "pnl": 4285.687355834336,
+      "total_return": 0.04340733282449993,
+      "annualized_return": 0.0434123946118814,
+      "sharpe": 0.5026671036071849,
+      "max_drawdown": -0.1075688413533625,
+      "borrow_fees_paid": 1479.7627969214961,
+      "window": "1y_okx"
+    },
+    {
+      "name": "baseline_no_guard",
+      "bars": 720,
+      "trades": 4,
+      "guarded_trades": 0,
+      "final_capital": 104249.459704201,
+      "pnl": 4249.459704200999,
+      "total_return": 0.04249459704201142,
+      "annualized_return": 0.6603662416498948,
+      "sharpe": 4.484975281133342,
+      "max_drawdown": -0.022451056283335605,
+      "borrow_fees_paid": 109.59758137866886,
+      "window": "30d_kraken"
+    },
+    {
+      "name": "dynamic_extreme_scale_z2.5",
+      "bars": 720,
+      "trades": 5,
+      "guarded_trades": 1,
+      "final_capital": 103838.32232024413,
+      "pnl": 3838.3223202441295,
+      "total_return": 0.03838322320244192,
+      "annualized_return": 0.5823225924315991,
+      "sharpe": 3.5230356016429054,
+      "max_drawdown": -0.02851933212923908,
+      "borrow_fees_paid": 139.15187187640194,
+      "window": "30d_kraken"
+    },
+    {
+      "name": "dynamic_extreme_block_z2.5",
+      "bars": 720,
+      "trades": 8,
+      "guarded_trades": 0,
+      "final_capital": 103540.60392143996,
+      "pnl": 3540.6039214399643,
+      "total_return": 0.03540603921440333,
+      "annualized_return": 0.527926530731464,
+      "sharpe": 3.734734892824837,
+      "max_drawdown": -0.024284652580388512,
+      "borrow_fees_paid": 135.90438538798014,
+      "window": "30d_kraken"
+    }
+  ]
+}
