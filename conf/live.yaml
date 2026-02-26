@@ -37,7 +37,7 @@ agents:
       session_end: 11
       session_timezone: America/New_York
       enable_session_range_breakout_reversal: true
-      session_range_breakout_only: true
+      session_range_breakout_only: false  # Include FVG fallback with breakout logic
       enable_high_breakout_short: true
       enable_low_breakout_long: true
       exit_on_session_target_hit: true

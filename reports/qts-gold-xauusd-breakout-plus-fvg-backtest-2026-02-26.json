@@ -1,0 +1,54 @@
+{
+  "generated_at_utc": "2026-02-26T21:03:22.860965+00:00",
+  "symbol": "XAU/USD:USD",
+  "rows": [
+    {
+      "label": "365d_1h",
+      "mode": "breakout_only",
+      "bars": 541,
+      "trades": 2,
+      "final_capital": 99995.36012305078,
+      "pnl": -4.639876949222526,
+      "annualized_return": -0.0007524253979899198,
+      "sharpe": -2.757419942417366,
+      "max_drawdown": -6.510400000003802e-05,
+      "borrow_fees_paid": 0.06659629275547058
+    },
+    {
+      "label": "90d_15m",
+      "mode": "breakout_only",
+      "bars": 2164,
+      "trades": 5,
+      "final_capital": 100180.41334322833,
+      "pnl": 180.413343228327,
+      "annualized_return": 0.029630632393281564,
+      "sharpe": 1.5917627068350217,
+      "max_drawdown": -0.002596804255792081,
+      "borrow_fees_paid": 0.0
+    },
+    {
+      "label": "365d_1h",
+      "mode": "breakout_plus_fvg",
+      "bars": 541,
+      "trades": 2,
+      "final_capital": 99995.36012305078,
+      "pnl": -4.639876949222526,
+      "annualized_return": -0.0007524253979899198,
+      "sharpe": -2.757419942417366,
+      "max_drawdown": -6.510400000003802e-05,
+      "borrow_fees_paid": 0.06659629275547058
+    },
+    {
+      "label": "90d_15m",
+      "mode": "breakout_plus_fvg",
+      "bars": 2164,
+      "trades": 5,
+      "final_capital": 100180.41334322833,
+      "pnl": 180.413343228327,
+      "annualized_return": 0.029630632393281564,
+      "sharpe": 1.5917627068350217,
+      "max_drawdown": -0.002596804255792081,
+      "borrow_fees_paid": 0.0
+    }
+  ]
+}
