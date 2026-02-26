@@ -1,0 +1,100 @@
+{
+  "generated_at_utc": "2026-02-26T20:07:57.656117+00:00",
+  "exchange": "okx",
+  "symbols": {
+    "XAUUSD": {
+      "ccxt_symbol": "XAU/USD:USD",
+      "found": true,
+      "market_type": "swap",
+      "spot": false,
+      "swap": true,
+      "active": true,
+      "maker": 0.0002,
+      "taker": 0.0005,
+      "coverage_365d_1h": {
+        "bars": 541,
+        "expected_bars": 8760,
+        "coverage": 0.06175799086757991,
+        "start": "2026-02-04 08:00:00+00:00",
+        "end": "2026-02-26 20:00:00+00:00",
+        "mean_volume": 0.17632162661737522
+      },
+      "coverage_90d_15m": {
+        "bars": 2161,
+        "expected_bars": 8640,
+        "coverage": 0.2501157407407407,
+        "start": "2026-02-04 08:00:00+00:00",
+        "end": "2026-02-26 20:00:00+00:00",
+        "mean_volume": 0.044141601110596944
+      }
+    },
+    "XAUTUSDT": {
+      "ccxt_symbol": "XAUT/USDT",
+      "found": true,
+      "market_type": "spot",
+      "spot": true,
+      "swap": false,
+      "active": true,
+      "maker": 0.001,
+      "taker": 0.0015,
+      "coverage_365d_1h": {
+        "bars": 8760,
+        "expected_bars": 8760,
+        "coverage": 1.0,
+        "start": "2025-02-26 21:00:00+00:00",
+        "end": "2026-02-26 20:00:00+00:00",
+        "mean_volume": 79.95621802066209
+      },
+      "coverage_90d_15m": {
+        "bars": 8640,
+        "expected_bars": 8640,
+        "coverage": 1.0,
+        "start": "2025-11-28 20:15:00+00:00",
+        "end": "2026-02-26 20:00:00+00:00",
+        "mean_volume": 50.29242610092593
+      }
+    }
+  },
+  "backtests": [
+    {
+      "case": "XAUUSD_365d_1h",
+      "bars": 541,
+      "trades": 3,
+      "final_capital": 99597.43799591798,
+      "annualized_return": -0.06334129211389272,
+      "sharpe": -5.398316689299218,
+      "max_drawdown": -0.004083775721876718,
+      "borrow_fees_paid": 14.609998867817609
+    },
+    {
+      "case": "XAUUSD_90d_15m",
+      "bars": 2161,
+      "trades": 5,
+      "final_capital": 100138.41334322833,
+      "annualized_return": 0.02269182471797726,
+      "sharpe": 1.222050675555913,
+      "max_drawdown": -0.0027588461016774457,
+      "borrow_fees_paid": 0.0
+    },
+    {
+      "case": "XAUTUSDT_365d_1h",
+      "bars": 8760,
+      "trades": 441,
+      "final_capital": 91786.30594964293,
+      "annualized_return": -0.08214592177662106,
+      "sharpe": -2.8416070373968476,
+      "max_drawdown": -0.0915791648708415,
+      "borrow_fees_paid": 416.96350253546984
+    },
+    {
+      "case": "XAUTUSDT_90d_15m",
+      "bars": 8640,
+      "trades": 207,
+      "final_capital": 93200.6488648901,
+      "annualized_return": -0.248442108171801,
+      "sharpe": -6.026821085467863,
+      "max_drawdown": -0.07079186470090673,
+      "borrow_fees_paid": 102.6362013226064
+    }
+  ]
+}
