@@ -1,0 +1,49 @@
+{
+  "generated_at_utc": "2026-02-26T20:28:20.398790+00:00",
+  "exchange": "kucoin",
+  "symbol": "PAXG/USDT",
+  "market_type": "spot",
+  "taker_fee": 0.001,
+  "coverage": {
+    "365d_1h": {
+      "bars": 8760,
+      "expected": 8760,
+      "coverage": 1.0,
+      "start": "2025-02-26 21:00:00+00:00",
+      "end": "2026-02-26 20:00:00+00:00",
+      "mean_volume": 13.621566133686073
+    },
+    "90d_15m": {
+      "bars": 8640,
+      "expected": 8640,
+      "coverage": 1.0,
+      "start": "2025-11-28 20:30:00+00:00",
+      "end": "2026-02-26 20:15:00+00:00",
+      "mean_volume": 5.402056429449074
+    }
+  },
+  "results": [
+    {
+      "case": "365d_1h",
+      "bars": 8760,
+      "trades": 492,
+      "final_capital": 93749.99096228139,
+      "pnl": -6250.009037718613,
+      "annualized_return": -0.06250699809784255,
+      "sharpe": -2.286765074939907,
+      "max_drawdown": -0.07576797885045929,
+      "borrow_fees_paid": 392.4715275828739
+    },
+    {
+      "case": "90d_15m",
+      "bars": 8640,
+      "trades": 240,
+      "final_capital": 94095.82968939297,
+      "pnl": -5904.1703106070345,
+      "annualized_return": -0.21873065466040087,
+      "sharpe": -5.946345005323442,
+      "max_drawdown": -0.06347848952496551,
+      "borrow_fees_paid": 95.63746968170413
+    }
+  ]
+}
