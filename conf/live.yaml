@@ -36,6 +36,11 @@ agents:
       session_start: 8  # NY local kill zone 08:00-11:00 (DST-aware)
       session_end: 11
       session_timezone: America/New_York
+      enable_session_range_breakout_reversal: true
+      enable_high_breakout_short: true
+      enable_low_breakout_long: true
+      exit_on_session_target_hit: true
+      breakout_buffer_bps: 0.0
   risk:
     _target_: qts_core.agents.base.StrictRiskAgent
     name: GlobalRiskOfficer

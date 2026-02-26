@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -78,6 +78,11 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         session_timezone: str = "UTC",
         min_fvg_size: float = 0.001,
         base_confidence: float = 0.80,
+        enable_session_range_breakout_reversal: bool = False,
+        enable_high_breakout_short: bool = True,
+        enable_low_breakout_long: bool = True,
+        exit_on_session_target_hit: bool = True,
+        breakout_buffer_bps: float = 0.0,
         priority: AgentPriority = AgentPriority.HIGH,
         min_confidence: float = 0.6,
     ) -> None:
@@ -91,6 +96,12 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             session_timezone: IANA timezone name (e.g., "UTC", "America/New_York").
             min_fvg_size: Minimum FVG size as fraction (0.001 = 0.1%).
             base_confidence: Base confidence level for signals.
+            enable_session_range_breakout_reversal: If true, detect session
+                high/low breakouts and trade reversal-to-range targets.
+            enable_high_breakout_short: Allow short entries on session-high breaks.
+            enable_low_breakout_long: Allow long entries on session-low breaks.
+            exit_on_session_target_hit: Emit EXIT when reversal target is reached.
+            breakout_buffer_bps: Extra breakout buffer in bps to avoid noise.
             priority: Signal priority.
             min_confidence: Minimum confidence to emit signals.
         """
@@ -111,9 +122,23 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             self._session_tz = timezone.utc
         self.min_fvg_size = min_fvg_size
         self.base_confidence = base_confidence
+        self.enable_session_range_breakout_reversal = (
+            enable_session_range_breakout_reversal
+        )
+        self.enable_high_breakout_short = enable_high_breakout_short
+        self.enable_low_breakout_long = enable_low_breakout_long
+        self.exit_on_session_target_hit = exit_on_session_target_hit
+        self.breakout_buffer_bps = max(0.0, breakout_buffer_bps)
 
         # Internal history buffer for when OHLCV history isn't provided
         self._history: deque[OHLCVTuple] = deque(maxlen=self.MIN_CANDLES)
+
+        # Session range tracking (local session timezone date-scoped).
+        self._session_date: date | None = None
+        self._session_high: float | None = None
+        self._session_low: float | None = None
+        self._active_short_target_low: float | None = None
+        self._active_long_target_high: float | None = None
 
     def _is_in_kill_zone(self, ts: datetime) -> bool:
         """Check if timestamp falls within configured kill-zone window."""
@@ -134,6 +159,27 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
 
         # Start == end means disabled/full-day ambiguity; keep conservative.
         return False
+
+    def _reset_session_state_if_needed(self, local_date: date) -> None:
+        """Reset per-session tracking when local trading date changes."""
+        if self._session_date == local_date:
+            return
+
+        self._session_date = local_date
+        self._session_high = None
+        self._session_low = None
+        self._active_short_target_low = None
+        self._active_long_target_high = None
+
+    def _breakout_threshold(self, reference: float, direction: str) -> float:
+        """Return breakout threshold with optional bps buffer."""
+        if self.breakout_buffer_bps <= 0 or reference <= 0:
+            return reference
+
+        buffer = self.breakout_buffer_bps / 10_000.0
+        if direction == "up":
+            return reference * (1.0 + buffer)
+        return reference * (1.0 - buffer)
 
     def _detect_fvg(self, candles: list[OHLCVTuple]) -> FVGResult:
         """Detect Fair Value Gap in the last 3 candles.
@@ -230,13 +276,65 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             )
             return None
 
-        # Only trade during kill zones
         local_ts = timestamp
         if local_ts.tzinfo is None:
             local_ts = local_ts.replace(tzinfo=timezone.utc)
         local_ts = local_ts.astimezone(self._session_tz)
+        self._reset_session_state_if_needed(local_ts.date())
 
-        if not self._is_in_kill_zone(timestamp):
+        latest_candle = ohlcv_history[-1] if ohlcv_history else None
+        candle_high = float(latest_candle[IDX_HIGH]) if latest_candle else current_price
+        candle_low = float(latest_candle[IDX_LOW]) if latest_candle else current_price
+
+        if self.enable_session_range_breakout_reversal and self.exit_on_session_target_hit:
+            if (
+                self._active_short_target_low is not None
+                and current_price <= self._active_short_target_low
+            ):
+                target_low = self._active_short_target_low
+                self._active_short_target_low = None
+                return AgentSignal(
+                    source_agent=self.name,
+                    signal_type=SignalType.EXIT,
+                    confidence=max(self.base_confidence, 0.8),
+                    priority=self.priority,
+                    timestamp=timestamp,
+                    metadata={
+                        "pattern": "Session short target hit",
+                        "target_low": target_low,
+                        "session": (
+                            f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                            f"{self.session_timezone}"
+                        ),
+                        "symbol": self.symbol,
+                    },
+                )
+
+            if (
+                self._active_long_target_high is not None
+                and current_price >= self._active_long_target_high
+            ):
+                target_high = self._active_long_target_high
+                self._active_long_target_high = None
+                return AgentSignal(
+                    source_agent=self.name,
+                    signal_type=SignalType.EXIT,
+                    confidence=max(self.base_confidence, 0.8),
+                    priority=self.priority,
+                    timestamp=timestamp,
+                    metadata={
+                        "pattern": "Session long target hit",
+                        "target_high": target_high,
+                        "session": (
+                            f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                            f"{self.session_timezone}"
+                        ),
+                        "symbol": self.symbol,
+                    },
+                )
+
+        in_kill_zone = self._is_in_kill_zone(timestamp)
+        if not in_kill_zone:
             log.debug(
                 "Outside kill zone",
                 agent=self.name,
@@ -245,6 +343,62 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
                 kill_zone=f"{self.session_start}-{self.session_end}",
             )
             return None
+
+        if self.enable_session_range_breakout_reversal:
+            prev_high = self._session_high
+            prev_low = self._session_low
+
+            if prev_high is None or prev_low is None:
+                self._session_high = candle_high
+                self._session_low = candle_low
+            else:
+                high_break = candle_high > self._breakout_threshold(prev_high, "up")
+                low_break = candle_low < self._breakout_threshold(prev_low, "down")
+
+                self._session_high = max(prev_high, candle_high)
+                self._session_low = min(prev_low, candle_low)
+
+                if high_break and self.enable_high_breakout_short:
+                    self._active_short_target_low = prev_low
+                    self._active_long_target_high = None
+                    return AgentSignal(
+                        source_agent=self.name,
+                        signal_type=SignalType.SHORT,
+                        confidence=max(self.base_confidence, 0.8),
+                        priority=self.priority,
+                        timestamp=timestamp,
+                        metadata={
+                            "pattern": "Session high breakout reversal",
+                            "session_high": prev_high,
+                            "target_low": prev_low,
+                            "session": (
+                                f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                                f"{self.session_timezone}"
+                            ),
+                            "symbol": self.symbol,
+                        },
+                    )
+
+                if low_break and self.enable_low_breakout_long:
+                    self._active_long_target_high = prev_high
+                    self._active_short_target_low = None
+                    return AgentSignal(
+                        source_agent=self.name,
+                        signal_type=SignalType.LONG,
+                        confidence=max(self.base_confidence, 0.8),
+                        priority=self.priority,
+                        timestamp=timestamp,
+                        metadata={
+                            "pattern": "Session low breakout reversal",
+                            "session_low": prev_low,
+                            "target_high": prev_high,
+                            "session": (
+                                f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                                f"{self.session_timezone}"
+                            ),
+                            "symbol": self.symbol,
+                        },
+                    )
 
         # Use provided history or internal buffer
         candles: list[OHLCVTuple]

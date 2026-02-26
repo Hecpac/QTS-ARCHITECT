@@ -7,7 +7,7 @@ Tests cover:
 - ICT FVG detection
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -241,6 +241,114 @@ class TestICTSmartMoneyAgent:
             ohlcv_history=bullish_ohlcv_history,
         )
         assert signal_outside is None
+
+    @pytest.mark.asyncio
+    async def test_session_high_breakout_emits_short_reversal(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """Break above session high should trigger short-to-session-low reversal."""
+        agent = ICTSmartMoneyAgent(
+            name="ict_test",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+            enable_session_range_breakout_reversal=True,
+            enable_high_breakout_short=True,
+            enable_low_breakout_long=True,
+            exit_on_session_target_hit=True,
+        )
+
+        base_ts = datetime(2024, 1, 15, 13, 0, 0, tzinfo=timezone.utc)  # 08:00 NY
+
+        neutral_history = [
+            (base_ts - timedelta(hours=2), 100.0, 101.0, 99.5, 100.5, 1000.0),
+            (base_ts - timedelta(hours=1), 100.5, 101.5, 100.0, 101.0, 1100.0),
+            (base_ts, 101.0, 102.0, 100.0, 101.5, 1200.0),
+        ]
+        first = await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=101.5,
+            timestamp=base_ts,
+            ohlcv_history=neutral_history,
+        )
+        assert first is None
+
+        breakout_ts = base_ts + timedelta(minutes=30)
+        breakout_history = [
+            (base_ts - timedelta(hours=1), 100.5, 101.5, 100.0, 101.0, 1100.0),
+            (base_ts, 101.0, 102.0, 100.0, 101.5, 1200.0),
+            (breakout_ts, 101.5, 103.5, 100.4, 103.0, 1300.0),
+        ]
+
+        signal = await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=103.0,
+            timestamp=breakout_ts,
+            ohlcv_history=breakout_history,
+        )
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.SHORT
+        assert signal.metadata.get("pattern") == "Session high breakout reversal"
+        assert signal.metadata.get("target_low") == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_session_breakout_short_exits_on_target_low(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """After high breakout short signal, hitting session low should emit EXIT."""
+        agent = ICTSmartMoneyAgent(
+            name="ict_test",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+            enable_session_range_breakout_reversal=True,
+            enable_high_breakout_short=True,
+            enable_low_breakout_long=False,
+            exit_on_session_target_hit=True,
+        )
+
+        base_ts = datetime(2024, 1, 15, 13, 0, 0, tzinfo=timezone.utc)
+        seed_history = [
+            (base_ts - timedelta(hours=2), 100.0, 101.0, 99.5, 100.5, 1000.0),
+            (base_ts - timedelta(hours=1), 100.5, 101.5, 100.0, 101.0, 1100.0),
+            (base_ts, 101.0, 102.0, 100.0, 101.5, 1200.0),
+        ]
+        await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=101.5,
+            timestamp=base_ts,
+            ohlcv_history=seed_history,
+        )
+
+        breakout_ts = base_ts + timedelta(minutes=30)
+        breakout_history = [
+            (base_ts - timedelta(hours=1), 100.5, 101.5, 100.0, 101.0, 1100.0),
+            (base_ts, 101.0, 102.0, 100.0, 101.5, 1200.0),
+            (breakout_ts, 101.5, 103.5, 100.4, 103.0, 1300.0),
+        ]
+        await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=103.0,
+            timestamp=breakout_ts,
+            ohlcv_history=breakout_history,
+        )
+
+        target_hit_ts = datetime(2024, 1, 15, 18, 0, 0, tzinfo=timezone.utc)
+        exit_signal = await agent.analyze(
+            instrument_id=instrument_id,
+            current_price=99.9,
+            timestamp=target_hit_ts,
+            ohlcv_history=breakout_history,
+        )
+
+        assert exit_signal is not None
+        assert exit_signal.signal_type == SignalType.EXIT
+        assert exit_signal.metadata.get("pattern") == "Session short target hit"
 
     @pytest.mark.asyncio
     async def test_no_signal_on_symbol_mismatch(

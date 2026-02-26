@@ -1,0 +1,55 @@
+{
+  "generated_at_utc": "2026-02-26T20:04:49.719424+00:00",
+  "symbol": "XAUT/USDT",
+  "session": {
+    "start": 8,
+    "end": 11,
+    "timezone": "America/New_York"
+  },
+  "rows": [
+    {
+      "name": "1y_1h_ny_8_11_breakout_off",
+      "bars": 8760,
+      "trades": 3,
+      "final_capital": 84805.77118253853,
+      "pnl": -15194.228817461466,
+      "annualized_return": -0.15195824481167486,
+      "sharpe": -2.3932235106995217,
+      "max_drawdown": -0.15374345927650135,
+      "borrow_fees_paid": 2129.1454412712737
+    },
+    {
+      "name": "1y_1h_ny_8_11_breakout_on",
+      "bars": 8760,
+      "trades": 441,
+      "final_capital": 91786.30594964293,
+      "pnl": -8213.694050357066,
+      "annualized_return": -0.08214592177662106,
+      "sharpe": -2.8416070373968476,
+      "max_drawdown": -0.0915791648708415,
+      "borrow_fees_paid": 416.96350253546984
+    },
+    {
+      "name": "90d_15m_ny_8_11_breakout_off",
+      "bars": 8640,
+      "trades": 3,
+      "final_capital": 96071.6939301498,
+      "pnl": -3928.306069850194,
+      "annualized_return": -0.15002392226673344,
+      "sharpe": -2.534085772743335,
+      "max_drawdown": -0.05471412264452797,
+      "borrow_fees_paid": 344.5601812851415
+    },
+    {
+      "name": "90d_15m_ny_8_11_breakout_on",
+      "bars": 8640,
+      "trades": 207,
+      "final_capital": 93200.6488648901,
+      "pnl": -6799.3511351099005,
+      "annualized_return": -0.248442108171801,
+      "sharpe": -6.026821085467865,
+      "max_drawdown": -0.07079186470090673,
+      "borrow_fees_paid": 102.6362013226064
+    }
+  ]
+}
