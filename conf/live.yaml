@@ -33,8 +33,8 @@ agents:
     - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
       name: ICT_Sniper_NY
       symbol: BTC/USDT
-      session_start: 13  # Balanced: restored NY+London overlap (13-17 UTC); was 0
-      session_end: 17
+      session_start: 13  # NY kill zone 08:00-11:00 (EST) => 13:00-16:00 UTC
+      session_end: 16
   risk:
     _target_: qts_core.agents.base.StrictRiskAgent
     name: GlobalRiskOfficer
