@@ -476,6 +476,32 @@ class _TwoStepBacktestSupervisor:
         return None
 
 
+class _OpenShortOnlySupervisor:
+    """Deterministic supervisor that opens once, then emits no further decisions."""
+
+    def __init__(self, instrument_id: InstrumentId) -> None:
+        self.instrument_id = instrument_id
+        self._calls = 0
+
+    async def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+        if self._calls == 1:
+            return TradingDecision(
+                instrument_id=self.instrument_id,
+                action=SignalType.SHORT,
+                quantity_modifier=1.0,
+                rationale="open short only",
+            )
+        return None
+
+
+class _NoopBacktestSupervisor:
+    """Supervisor stub that never emits decisions."""
+
+    async def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+
 class TestEventEngineExitSemantics:
     """Tests for EXIT behavior with signed positions."""
 
@@ -679,3 +705,97 @@ class TestEventEngineExitSemantics:
         # One-day borrow on 10,000 notional at 1%/day => 100.
         assert engine.state.short_borrow_fees_paid == pytest.approx(100.0, rel=1e-2)
         assert result.final_capital == pytest.approx(99_900.0, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_run_force_closes_open_short_and_applies_carry(self) -> None:
+        """Open shorts should be force-closed at end with borrow fee applied."""
+        instrument = InstrumentId("BTC/USDT")
+        supervisor = _OpenShortOnlySupervisor(instrument)
+        config = BacktestConfig(
+            initial_capital=100_000.0,
+            trade_size=10_000.0,
+            short_borrow_rate_bps_per_day=100.0,
+            commission_bps=0.0,
+            slippage_bps=0.0,
+            force_close_positions_at_end=True,
+        )
+        engine = EventEngine(supervisor=supervisor, config=config)
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        data_feed = pl.DataFrame(
+            {
+                "timestamp": [start, start + timedelta(days=1)],
+                "instrument_id": [str(instrument), str(instrument)],
+                "open": [100.0, 100.0],
+                "high": [101.0, 101.0],
+                "low": [99.0, 99.0],
+                "close": [100.0, 100.0],
+                "volume": [1000.0, 1000.0],
+            }
+        )
+
+        result = await engine.run(data_feed)
+
+        # Trade #1 opens short, forced Trade #2 closes it at end.
+        assert result.total_trades == 2
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        assert engine.state.short_borrow_fees_paid == pytest.approx(100.0, rel=1e-2)
+        assert result.final_capital == pytest.approx(99_900.0, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_run_uses_last_known_prices_across_instruments(self) -> None:
+        """Equity should keep valuing held positions when another symbol ticks."""
+        engine = EventEngine(
+            supervisor=_NoopBacktestSupervisor(),
+            config=BacktestConfig(),
+        )
+        btc = InstrumentId("BTC/USDT")
+        eth = InstrumentId("ETH/USDT")
+
+        # Seed an existing BTC position.
+        engine.state.positions[btc] = 1.0
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        data_feed = pl.DataFrame(
+            {
+                "timestamp": [start, start + timedelta(hours=1)],
+                "instrument_id": [str(btc), str(eth)],
+                "open": [100.0, 50.0],
+                "high": [101.0, 51.0],
+                "low": [99.0, 49.0],
+                "close": [100.0, 50.0],
+                "volume": [1000.0, 2000.0],
+            }
+        )
+
+        result = await engine.run(data_feed)
+
+        assert result.equity_curve[0] == pytest.approx(100_100.0)
+        # BTC valuation should persist even when ETH is the latest tick.
+        assert result.equity_curve[1] == pytest.approx(100_100.0)
+
+    def test_calculate_metrics_infers_hourly_periods_per_year(self) -> None:
+        """Annualization should adapt to observed 1h bar spacing."""
+        engine = EventEngine(supervisor=object(), config=BacktestConfig())
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        engine.state.timestamps = [start + timedelta(hours=i) for i in range(4)]
+        engine.state.equity_curve = [100.0, 101.0, 100.0, 102.0]
+
+        metrics = engine._calculate_metrics(  # noqa: SLF001
+            start_date=engine.state.timestamps[0],
+            end_date=engine.state.timestamps[-1],
+        )
+        assert metrics is not None
+
+        returns = np.diff(np.array(engine.state.equity_curve)) / np.array(
+            engine.state.equity_curve[:-1]
+        )
+        expected = MetricsCalculator(returns, periods_per_year=24 * 365).calculate(
+            engine.state.timestamps[0],
+            engine.state.timestamps[-1],
+        )
+
+        assert metrics.volatility_annualized == pytest.approx(
+            expected.volatility_annualized
+        )

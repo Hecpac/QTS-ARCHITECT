@@ -119,6 +119,7 @@ class BacktestConfig(BaseModel):
     high_volatility_hours_utc: tuple[int, ...] = Field(default_factory=tuple)
     high_volatility_hours_size_scale: float = Field(default=1.0, ge=0.0, le=1.0)
     high_volatility_hours_entry_block: bool = False
+    force_close_positions_at_end: bool = True
 
 
 class BacktestResult(BaseModel):
@@ -332,6 +333,7 @@ class EventEngine:
         bars_processed = 0
 
         history_by_instrument: dict[InstrumentId, deque[OHLCVTuple]] = {}
+        last_prices: dict[InstrumentId, float] = {}
 
         for row in data_feed.iter_rows(named=True):
             # Parse timestamp
@@ -354,9 +356,9 @@ class EventEngine:
                 volume=row["volume"],
             )
 
-            # Mark to market
-            prices = {market_data.instrument_id: market_data.close}
-            equity = self.state.mark_to_market(prices, ts)
+            # Mark to market using latest known prices across all instruments.
+            last_prices[market_data.instrument_id] = market_data.close
+            equity = self.state.mark_to_market(last_prices, ts)
 
             # Build rolling OHLCV history for agents
             ohlcv_tuple: OHLCVTuple = (
@@ -396,19 +398,35 @@ class EventEngine:
 
                 # Re-mark same bar after execution so equity reflects fills/carry.
                 updated_position_value = sum(
-                    qty * prices.get(instrument_id, 0.0)
+                    qty * last_prices.get(instrument_id, 0.0)
                     for instrument_id, qty in self.state.positions.items()
                 )
                 self.state.equity_curve[-1] = self.state.cash + updated_position_value
 
             bars_processed += 1
 
-        # Calculate final equity
-        final_capital = (
-            self.state.equity_curve[-1]
-            if self.state.equity_curve
-            else self.config.initial_capital
-        )
+        if (
+            self.config.force_close_positions_at_end
+            and end_date is not None
+            and any(abs(qty) > DUST_EPS for qty in self.state.positions.values())
+        ):
+            self._force_close_open_positions(last_prices=last_prices, asof=end_date)
+            final_position_value = sum(
+                qty * last_prices.get(instrument_id, 0.0)
+                for instrument_id, qty in self.state.positions.items()
+            )
+            final_capital = self.state.cash + final_position_value
+            if self.state.equity_curve:
+                self.state.equity_curve[-1] = final_capital
+            else:
+                self.state.equity_curve.append(final_capital)
+                self.state.timestamps.append(end_date)
+        else:
+            final_capital = (
+                self.state.equity_curve[-1]
+                if self.state.equity_curve
+                else self.config.initial_capital
+            )
 
         log.info(
             "Backtest complete",
@@ -432,6 +450,63 @@ class EventEngine:
             end_date=end_date,
             bars_processed=bars_processed,
         )
+
+    def _force_close_open_positions(
+        self,
+        last_prices: dict[InstrumentId, float],
+        asof: datetime,
+    ) -> None:
+        """Force-close open positions at backtest end for realistic accounting."""
+        for instrument_id, position_qty in list(self.state.positions.items()):
+            if abs(position_qty) < DUST_EPS:
+                continue
+
+            last_price = last_prices.get(instrument_id)
+            if last_price is None or last_price <= 0:
+                log.warning(
+                    "Skipping forced close: missing last price",
+                    instrument=instrument_id,
+                    quantity=position_qty,
+                )
+                continue
+
+            exit_decision = TradingDecision(
+                instrument_id=instrument_id,
+                action=SignalType.EXIT,
+                quantity_modifier=1.0,
+                rationale="Backtest forced close at end-of-run",
+            )
+            market_data = MarketData(
+                instrument_id=instrument_id,
+                timestamp=asof,
+                open=last_price,
+                high=last_price,
+                low=last_price,
+                close=last_price,
+                volume=0.0,
+            )
+            self._execute(exit_decision, market_data)
+
+    def _infer_periods_per_year(self) -> int:
+        """Infer annualization frequency from observed bar spacing."""
+        if len(self.state.timestamps) < 2:
+            return 252
+
+        deltas_seconds = [
+            (curr - prev).total_seconds()
+            for prev, curr in zip(self.state.timestamps, self.state.timestamps[1:])
+            if (curr - prev).total_seconds() > 0
+        ]
+        if not deltas_seconds:
+            return 252
+
+        median_seconds = float(np.median(np.asarray(deltas_seconds, dtype=np.float64)))
+        if median_seconds <= 0:
+            return 252
+
+        seconds_per_year = 365.0 * 24.0 * 3600.0
+        periods_per_year = int(round(seconds_per_year / median_seconds))
+        return max(1, periods_per_year)
 
     def _apply_hour_guardrail(
         self,
@@ -728,7 +803,8 @@ class EventEngine:
         equity = np.array(self.state.equity_curve)
         returns = np.diff(equity) / equity[:-1]
 
-        calc = MetricsCalculator(returns)
+        periods_per_year = self._infer_periods_per_year()
+        calc = MetricsCalculator(returns, periods_per_year=periods_per_year)
         return calc.calculate(start_date, end_date)
 
     def _log_trade(
