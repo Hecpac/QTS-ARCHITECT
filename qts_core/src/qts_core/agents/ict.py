@@ -79,6 +79,7 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         min_fvg_size: float = 0.001,
         base_confidence: float = 0.80,
         enable_session_range_breakout_reversal: bool = False,
+        session_range_breakout_only: bool = False,
         enable_high_breakout_short: bool = True,
         enable_low_breakout_long: bool = True,
         exit_on_session_target_hit: bool = True,
@@ -98,6 +99,8 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             base_confidence: Base confidence level for signals.
             enable_session_range_breakout_reversal: If true, detect session
                 high/low breakouts and trade reversal-to-range targets.
+            session_range_breakout_only: If true with breakout reversal enabled,
+                disable FVG fallback and trade only session range breakouts.
             enable_high_breakout_short: Allow short entries on session-high breaks.
             enable_low_breakout_long: Allow long entries on session-low breaks.
             exit_on_session_target_hit: Emit EXIT when reversal target is reached.
@@ -125,6 +128,7 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         self.enable_session_range_breakout_reversal = (
             enable_session_range_breakout_reversal
         )
+        self.session_range_breakout_only = session_range_breakout_only
         self.enable_high_breakout_short = enable_high_breakout_short
         self.enable_low_breakout_long = enable_low_breakout_long
         self.exit_on_session_target_hit = exit_on_session_target_hit
@@ -399,6 +403,12 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
                             "symbol": self.symbol,
                         },
                     )
+
+        if (
+            self.enable_session_range_breakout_reversal
+            and self.session_range_breakout_only
+        ):
+            return None
 
         # Use provided history or internal buffer
         candles: list[OHLCVTuple]

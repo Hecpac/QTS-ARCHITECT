@@ -1,0 +1,55 @@
+{
+  "generated_at_utc": "2026-02-26T20:57:28.933205+00:00",
+  "symbol": "XAUT/USDT",
+  "session_rule": "NY 08:00-11:00 breakout-only (no FVG fallback)",
+  "rows": [
+    {
+      "case": "1y_1h",
+      "mode": "ict_only",
+      "bars": 8760,
+      "trades": 414,
+      "final_capital": 92894.91262446433,
+      "pnl": -7105.087375535673,
+      "annualized_return": -0.0710586902268151,
+      "sharpe": -2.8300248778651556,
+      "max_drawdown": -0.08245925656529492,
+      "borrow_fees_paid": 385.9167808962401
+    },
+    {
+      "case": "90d_15m",
+      "mode": "ict_only",
+      "bars": 8640,
+      "trades": 203,
+      "final_capital": 93303.68540739379,
+      "pnl": -6696.314592606213,
+      "annualized_return": -0.2450663682387122,
+      "sharpe": -5.928216345167623,
+      "max_drawdown": -0.06976215691395411,
+      "borrow_fees_paid": 101.60402613058375
+    },
+    {
+      "case": "1y_1h",
+      "mode": "full_stack",
+      "bars": 8760,
+      "trades": 424,
+      "final_capital": 92834.79176401834,
+      "pnl": -7165.208235981656,
+      "annualized_return": -0.0716599623886568,
+      "sharpe": -2.4867906527968877,
+      "max_drawdown": -0.08218101706262045,
+      "borrow_fees_paid": 403.00639047627493
+    },
+    {
+      "case": "90d_15m",
+      "mode": "full_stack",
+      "bars": 8640,
+      "trades": 203,
+      "final_capital": 93303.68540739379,
+      "pnl": -6696.314592606213,
+      "annualized_return": -0.2450663682387122,
+      "sharpe": -5.928216345167623,
+      "max_drawdown": -0.06976215691395411,
+      "borrow_fees_paid": 101.60402613058375
+    }
+  ]
+}

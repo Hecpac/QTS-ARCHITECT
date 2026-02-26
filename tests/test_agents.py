@@ -255,6 +255,7 @@ class TestICTSmartMoneyAgent:
             session_end=11,
             session_timezone="America/New_York",
             enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
             enable_high_breakout_short=True,
             enable_low_breakout_long=True,
             exit_on_session_target_hit=True,
@@ -307,6 +308,7 @@ class TestICTSmartMoneyAgent:
             session_end=11,
             session_timezone="America/New_York",
             enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
             enable_high_breakout_short=True,
             enable_low_breakout_long=False,
             exit_on_session_target_hit=True,
@@ -349,6 +351,48 @@ class TestICTSmartMoneyAgent:
         assert exit_signal is not None
         assert exit_signal.signal_type == SignalType.EXIT
         assert exit_signal.metadata.get("pattern") == "Session short target hit"
+
+    @pytest.mark.asyncio
+    async def test_breakout_only_mode_disables_fvg_fallback(
+        self,
+        instrument_id: InstrumentId,
+        timestamp: datetime,
+        bullish_ohlcv_history: list,
+    ) -> None:
+        """When breakout-only is enabled, FVG fallback must stay disabled."""
+        with_fallback = ICTSmartMoneyAgent(
+            name="ict_fallback",
+            symbol="BTC/USDT",
+            session_start=13,
+            session_end=16,
+            enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=False,
+        )
+        fallback_signal = await with_fallback.analyze(
+            instrument_id=instrument_id,
+            current_price=109.0,
+            timestamp=timestamp,
+            ohlcv_history=bullish_ohlcv_history,
+        )
+        assert fallback_signal is not None
+        assert fallback_signal.signal_type == SignalType.LONG
+        assert fallback_signal.metadata.get("pattern") == "Bullish FVG"
+
+        breakout_only = ICTSmartMoneyAgent(
+            name="ict_breakout_only",
+            symbol="BTC/USDT",
+            session_start=13,
+            session_end=16,
+            enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
+        )
+        breakout_only_signal = await breakout_only.analyze(
+            instrument_id=instrument_id,
+            current_price=109.0,
+            timestamp=timestamp,
+            ohlcv_history=bullish_ohlcv_history,
+        )
+        assert breakout_only_signal is None
 
     @pytest.mark.asyncio
     async def test_no_signal_on_symbol_mismatch(
