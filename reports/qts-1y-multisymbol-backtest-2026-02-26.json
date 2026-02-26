@@ -1,0 +1,70 @@
+{
+  "generated_at_utc": "2026-02-26T19:03:29.926974+00:00",
+  "assumptions": {
+    "exchange": "okx",
+    "timeframe": "1h",
+    "days": 365,
+    "commission_bps": 15.0,
+    "slippage_bps": 5.0,
+    "risk_cap_per_position": 0.15,
+    "dynamic_extreme_block": {
+      "enabled": true,
+      "zscore_threshold": 2.5,
+      "high_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ]
+    }
+  },
+  "btc_only": {
+    "name": "1y_btc_only",
+    "symbols": [
+      "BTC/USDT"
+    ],
+    "bars": 8760,
+    "trades": 11,
+    "trades_by_symbol": {
+      "BTC/USDT": 11
+    },
+    "final_capital": 104285.68735583434,
+    "pnl": 4285.687355834336,
+    "total_return": 0.04340733282449993,
+    "annualized_return": 0.0434123946118814,
+    "sharpe": 0.5026671036071849,
+    "max_drawdown": -0.1075688413533625,
+    "borrow_fees_paid": 1479.7627969214961
+  },
+  "multi_symbol": {
+    "name": "1y_btc_eth_sol",
+    "symbols": [
+      "BTC/USDT",
+      "ETH/USDT",
+      "SOL/USDT"
+    ],
+    "bars": 26280,
+    "trades": 26,
+    "trades_by_symbol": {
+      "BTC/USDT": 11,
+      "ETH/USDT": 8,
+      "SOL/USDT": 7
+    },
+    "final_capital": 93420.59507287916,
+    "pnl": -6579.404927120835,
+    "total_return": -0.06530094006791376,
+    "annualized_return": -0.02225959371910302,
+    "sharpe": 0.014780585887426399,
+    "max_drawdown": -0.29783476603840175,
+    "borrow_fees_paid": 3200.8915938753635
+  },
+  "delta_multi_minus_btc": {
+    "trades_delta": 15,
+    "final_capital_delta": -10865.092282955171,
+    "annualized_return_delta": -0.06567198833098442,
+    "max_drawdown_delta": -0.19026592468503925,
+    "sharpe_delta": -0.4878865177197585
+  }
+}
