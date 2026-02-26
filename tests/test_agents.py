@@ -395,6 +395,155 @@ class TestICTSmartMoneyAgent:
         assert breakout_only_signal is None
 
     @pytest.mark.asyncio
+    async def test_hard_block_minute_blocks_entry_signal(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """Global minute embargo should block entries at configured NY HH:MM."""
+        baseline_agent = ICTSmartMoneyAgent(
+            name="ict_baseline",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+            enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
+            enable_high_breakout_short=False,
+            enable_low_breakout_long=True,
+            exit_on_session_target_hit=False,
+        )
+        blocked_agent = ICTSmartMoneyAgent(
+            name="ict_blocked",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+            enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
+            enable_high_breakout_short=False,
+            enable_low_breakout_long=True,
+            exit_on_session_target_hit=False,
+            hard_block_minutes_ny=("08:30",),
+        )
+
+        base_ts = datetime(2024, 1, 15, 13, 0, 0, tzinfo=timezone.utc)  # 08:00 NY
+        seed_history = [
+            (base_ts - timedelta(hours=2), 101.0, 102.0, 100.0, 101.5, 900.0),
+            (base_ts - timedelta(hours=1), 101.5, 103.0, 101.0, 102.5, 1100.0),
+            (base_ts, 102.5, 103.2, 101.2, 102.8, 1200.0),
+        ]
+        for agent in (baseline_agent, blocked_agent):
+            await agent.analyze(
+                instrument_id=instrument_id,
+                current_price=102.8,
+                timestamp=base_ts,
+                ohlcv_history=seed_history,
+            )
+
+        breakout_ts = base_ts + timedelta(minutes=30)  # 08:30 NY
+        breakout_history = [
+            (base_ts - timedelta(hours=1), 101.5, 103.0, 101.0, 102.5, 1100.0),
+            (base_ts, 102.5, 103.2, 101.2, 102.8, 1200.0),
+            (breakout_ts, 102.8, 103.0, 100.5, 100.7, 1300.0),
+        ]
+
+        baseline_signal = await baseline_agent.analyze(
+            instrument_id=instrument_id,
+            current_price=100.7,
+            timestamp=breakout_ts,
+            ohlcv_history=breakout_history,
+        )
+        blocked_signal = await blocked_agent.analyze(
+            instrument_id=instrument_id,
+            current_price=100.7,
+            timestamp=breakout_ts,
+            ohlcv_history=breakout_history,
+        )
+
+        assert baseline_signal is not None
+        assert baseline_signal.signal_type == SignalType.LONG
+        assert blocked_signal is None
+
+    @pytest.mark.asyncio
+    async def test_pattern_minute_block_and_soft_risk_scaling(
+        self,
+        instrument_id: InstrumentId,
+    ) -> None:
+        """Pattern-minute policy should block or scale only matching entries."""
+        blocked_agent = ICTSmartMoneyAgent(
+            name="ict_pattern_block",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+            enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
+            enable_high_breakout_short=False,
+            enable_low_breakout_long=True,
+            exit_on_session_target_hit=False,
+            hard_block_pattern_minutes_ny=(
+                "Session low breakout reversal|08:30",
+            ),
+        )
+        scaled_agent = ICTSmartMoneyAgent(
+            name="ict_pattern_scaled",
+            symbol="BTC/USDT",
+            session_start=8,
+            session_end=11,
+            session_timezone="America/New_York",
+            enable_session_range_breakout_reversal=True,
+            session_range_breakout_only=True,
+            enable_high_breakout_short=False,
+            enable_low_breakout_long=True,
+            exit_on_session_target_hit=False,
+            soft_risk_pattern_minutes_ny=(
+                "Session low breakout reversal|08:30",
+            ),
+            soft_risk_multiplier=0.5,
+        )
+
+        base_ts = datetime(2024, 1, 15, 13, 0, 0, tzinfo=timezone.utc)
+        seed_history = [
+            (base_ts - timedelta(hours=2), 101.0, 102.0, 100.0, 101.5, 900.0),
+            (base_ts - timedelta(hours=1), 101.5, 103.0, 101.0, 102.5, 1100.0),
+            (base_ts, 102.5, 103.2, 101.2, 102.8, 1200.0),
+        ]
+        for agent in (blocked_agent, scaled_agent):
+            await agent.analyze(
+                instrument_id=instrument_id,
+                current_price=102.8,
+                timestamp=base_ts,
+                ohlcv_history=seed_history,
+            )
+
+        breakout_ts = base_ts + timedelta(minutes=30)
+        breakout_history = [
+            (base_ts - timedelta(hours=1), 101.5, 103.0, 101.0, 102.5, 1100.0),
+            (base_ts, 102.5, 103.2, 101.2, 102.8, 1200.0),
+            (breakout_ts, 102.8, 103.0, 100.5, 100.7, 1300.0),
+        ]
+
+        blocked_signal = await blocked_agent.analyze(
+            instrument_id=instrument_id,
+            current_price=100.7,
+            timestamp=breakout_ts,
+            ohlcv_history=breakout_history,
+        )
+        scaled_signal = await scaled_agent.analyze(
+            instrument_id=instrument_id,
+            current_price=100.7,
+            timestamp=breakout_ts,
+            ohlcv_history=breakout_history,
+        )
+
+        assert blocked_signal is None
+        assert scaled_signal is not None
+        assert scaled_signal.signal_type == SignalType.LONG
+        assert scaled_signal.metadata.get("pattern") == "Session low breakout reversal"
+        assert scaled_signal.metadata.get("entry_hhmm_ny") == "08:30"
+        assert scaled_signal.metadata.get("size_multiplier") == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
     async def test_no_signal_on_symbol_mismatch(
         self,
         timestamp: datetime,
@@ -772,6 +921,53 @@ class TestSupervisor:
 
         assert decision is not None
         assert decision.action == SignalType.EXIT
+
+    @pytest.mark.asyncio
+    async def test_signal_size_multiplier_scales_decision_quantity(
+        self,
+        instrument_id: InstrumentId,
+        timestamp: datetime,
+    ) -> None:
+        """Supervisor should honor metadata size_multiplier when present."""
+
+        class SizedLongAgent:
+            name = "sized_long"
+
+            async def analyze(self, **_kwargs):
+                return AgentSignal(
+                    source_agent=self.name,
+                    signal_type=SignalType.LONG,
+                    confidence=0.8,
+                    priority=AgentPriority.NORMAL,
+                    timestamp=timestamp,
+                    metadata={"size_multiplier": 0.5},
+                )
+
+        supervisor = Supervisor(
+            strategy_agents=[SizedLongAgent()],
+            risk_agent=PermissiveRiskAgent(name="risk"),
+            consensus_strategy=ConsensusStrategy.HIGHEST_CONFIDENCE,
+            min_confidence=0.0,
+        )
+
+        market_data = MarketData(
+            instrument_id=instrument_id,
+            timestamp=timestamp,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=1000.0,
+        )
+
+        decision = await supervisor.run(
+            market_data,
+            ohlcv_history=[(timestamp, 100.0, 101.0, 99.0, 100.5, 1000.0)],
+        )
+
+        assert decision is not None
+        assert decision.action == SignalType.LONG
+        assert decision.quantity_modifier == pytest.approx(0.4)
 
     def test_supervisor_requires_at_least_one_agent(self) -> None:
         """Supervisor should require at least one strategy agent."""

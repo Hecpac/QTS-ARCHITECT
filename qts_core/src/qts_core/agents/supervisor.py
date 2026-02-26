@@ -230,7 +230,22 @@ class Supervisor:
             return None
 
         # 5. Generate Trading Decision
-        size_modifier = consensus_signal.confidence
+        signal_size_multiplier = 1.0
+        raw_multiplier = consensus_signal.metadata.get("size_multiplier")
+        if raw_multiplier is not None:
+            try:
+                signal_size_multiplier = max(0.0, min(1.0, float(raw_multiplier)))
+            except (TypeError, ValueError):
+                signal_size_multiplier = 1.0
+
+        size_modifier = consensus_signal.confidence * signal_size_multiplier
+        if signal_size_multiplier < 1.0:
+            log.info(
+                "Position size scaled by signal metadata",
+                signal_size_multiplier=signal_size_multiplier,
+                scaled=size_modifier,
+            )
+
         if verdict.status == RiskStatus.REDUCED:
             size_modifier *= verdict.adjusted_size
             log.info(

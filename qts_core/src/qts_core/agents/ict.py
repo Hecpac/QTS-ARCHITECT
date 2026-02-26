@@ -84,6 +84,10 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         enable_low_breakout_long: bool = True,
         exit_on_session_target_hit: bool = True,
         breakout_buffer_bps: float = 0.0,
+        hard_block_minutes_ny: tuple[str, ...] = (),
+        hard_block_pattern_minutes_ny: tuple[str, ...] = (),
+        soft_risk_pattern_minutes_ny: tuple[str, ...] = (),
+        soft_risk_multiplier: float = 1.0,
         priority: AgentPriority = AgentPriority.HIGH,
         min_confidence: float = 0.6,
     ) -> None:
@@ -105,6 +109,10 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             enable_low_breakout_long: Allow long entries on session-low breaks.
             exit_on_session_target_hit: Emit EXIT when reversal target is reached.
             breakout_buffer_bps: Extra breakout buffer in bps to avoid noise.
+            hard_block_minutes_ny: Entry embargo HH:MM list in session timezone.
+            hard_block_pattern_minutes_ny: Entry embargo by "Pattern|HH:MM".
+            soft_risk_pattern_minutes_ny: Size-reduction map by "Pattern|HH:MM".
+            soft_risk_multiplier: Position-size multiplier for soft-risk keys.
             priority: Signal priority.
             min_confidence: Minimum confidence to emit signals.
         """
@@ -133,6 +141,23 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         self.enable_low_breakout_long = enable_low_breakout_long
         self.exit_on_session_target_hit = exit_on_session_target_hit
         self.breakout_buffer_bps = max(0.0, breakout_buffer_bps)
+        self.soft_risk_multiplier = min(max(float(soft_risk_multiplier), 0.0), 1.0)
+
+        self._hard_block_minutes_ny = {
+            hhmm
+            for raw in hard_block_minutes_ny
+            if (hhmm := self._normalize_hhmm(str(raw))) is not None
+        }
+        self._hard_block_pattern_minutes_ny = {
+            pair
+            for raw in hard_block_pattern_minutes_ny
+            if (pair := self._normalize_pattern_minute_key(str(raw))) is not None
+        }
+        self._soft_risk_pattern_minutes_ny = {
+            pair
+            for raw in soft_risk_pattern_minutes_ny
+            if (pair := self._normalize_pattern_minute_key(str(raw))) is not None
+        }
 
         # Internal history buffer for when OHLCV history isn't provided
         self._history: deque[OHLCVTuple] = deque(maxlen=self.MIN_CANDLES)
@@ -143,6 +168,57 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
         self._session_low: float | None = None
         self._active_short_target_low: float | None = None
         self._active_long_target_high: float | None = None
+
+    @staticmethod
+    def _normalize_hhmm(raw: str) -> str | None:
+        """Normalize HH:MM strings; return None for invalid values."""
+        value = raw.strip()
+        parts = value.split(":")
+        if len(parts) != 2:
+            return None
+
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except ValueError:
+            return None
+
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+
+        return f"{hour:02d}:{minute:02d}"
+
+    def _normalize_pattern_minute_key(self, raw: str) -> tuple[str, str] | None:
+        """Normalize "Pattern|HH:MM" keys for pattern-minute gating."""
+        if "|" not in raw:
+            return None
+
+        pattern, minute = raw.split("|", 1)
+        pattern_key = pattern.strip().lower()
+        minute_key = self._normalize_hhmm(minute)
+        if not pattern_key or minute_key is None:
+            return None
+
+        return (pattern_key, minute_key)
+
+    def _entry_policy(self, pattern_name: str, minute_hhmm: str) -> tuple[bool, float]:
+        """Return entry allowance and optional size multiplier for pattern/minute."""
+        if minute_hhmm in self._hard_block_minutes_ny:
+            return (False, 1.0)
+
+        pattern_key = pattern_name.strip().lower()
+        pattern_minute_key = (pattern_key, minute_hhmm)
+
+        if pattern_minute_key in self._hard_block_pattern_minutes_ny:
+            return (False, 1.0)
+
+        if (
+            pattern_minute_key in self._soft_risk_pattern_minutes_ny
+            and self.soft_risk_multiplier < 1.0
+        ):
+            return (True, self.soft_risk_multiplier)
+
+        return (True, 1.0)
 
     def _is_in_kill_zone(self, ts: datetime) -> bool:
         """Check if timestamp falls within configured kill-zone window."""
@@ -285,6 +361,7 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             local_ts = local_ts.replace(tzinfo=timezone.utc)
         local_ts = local_ts.astimezone(self._session_tz)
         self._reset_session_state_if_needed(local_ts.date())
+        minute_hhmm = f"{local_ts.hour:02d}:{local_ts.minute:02d}"
 
         latest_candle = ohlcv_history[-1] if ohlcv_history else None
         candle_high = float(latest_candle[IDX_HIGH]) if latest_candle else current_price
@@ -363,45 +440,73 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
                 self._session_low = min(prev_low, candle_low)
 
                 if high_break and self.enable_high_breakout_short:
+                    pattern_name = "Session high breakout reversal"
+                    allow_entry, size_multiplier = self._entry_policy(
+                        pattern_name,
+                        minute_hhmm,
+                    )
+                    if not allow_entry:
+                        return None
+
                     self._active_short_target_low = prev_low
                     self._active_long_target_high = None
+                    metadata: dict[str, str | float | int | bool] = {
+                        "pattern": pattern_name,
+                        "session_high": prev_high,
+                        "target_low": prev_low,
+                        "entry_hhmm_ny": minute_hhmm,
+                        "entry_hour_ny": local_ts.hour,
+                        "session": (
+                            f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                            f"{self.session_timezone}"
+                        ),
+                        "symbol": self.symbol,
+                    }
+                    if size_multiplier < 1.0:
+                        metadata["size_multiplier"] = size_multiplier
+
                     return AgentSignal(
                         source_agent=self.name,
                         signal_type=SignalType.SHORT,
                         confidence=max(self.base_confidence, 0.8),
                         priority=self.priority,
                         timestamp=timestamp,
-                        metadata={
-                            "pattern": "Session high breakout reversal",
-                            "session_high": prev_high,
-                            "target_low": prev_low,
-                            "session": (
-                                f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
-                                f"{self.session_timezone}"
-                            ),
-                            "symbol": self.symbol,
-                        },
+                        metadata=metadata,
                     )
 
                 if low_break and self.enable_low_breakout_long:
+                    pattern_name = "Session low breakout reversal"
+                    allow_entry, size_multiplier = self._entry_policy(
+                        pattern_name,
+                        minute_hhmm,
+                    )
+                    if not allow_entry:
+                        return None
+
                     self._active_long_target_high = prev_high
                     self._active_short_target_low = None
+                    metadata: dict[str, str | float | int | bool] = {
+                        "pattern": pattern_name,
+                        "session_low": prev_low,
+                        "target_high": prev_high,
+                        "entry_hhmm_ny": minute_hhmm,
+                        "entry_hour_ny": local_ts.hour,
+                        "session": (
+                            f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                            f"{self.session_timezone}"
+                        ),
+                        "symbol": self.symbol,
+                    }
+                    if size_multiplier < 1.0:
+                        metadata["size_multiplier"] = size_multiplier
+
                     return AgentSignal(
                         source_agent=self.name,
                         signal_type=SignalType.LONG,
                         confidence=max(self.base_confidence, 0.8),
                         priority=self.priority,
                         timestamp=timestamp,
-                        metadata={
-                            "pattern": "Session low breakout reversal",
-                            "session_low": prev_low,
-                            "target_high": prev_high,
-                            "session": (
-                                f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
-                                f"{self.session_timezone}"
-                            ),
-                            "symbol": self.symbol,
-                        },
+                        metadata=metadata,
                     )
 
         if (
@@ -438,6 +543,13 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             0.95,
         )
 
+        allow_entry, size_multiplier = self._entry_policy(
+            fvg.pattern_name,
+            minute_hhmm,
+        )
+        if not allow_entry:
+            return None
+
         log.info(
             "FVG detected",
             agent=self.name,
@@ -446,20 +558,26 @@ class ICTSmartMoneyAgent(BaseStrategyAgent):
             confidence=f"{confidence:.2%}",
         )
 
+        metadata: dict[str, str | float | int | bool] = {
+            "pattern": fvg.pattern_name,
+            "gap_size_pct": fvg.gap_size * 100,
+            "kill_zone": True,
+            "entry_hhmm_ny": minute_hhmm,
+            "entry_hour_ny": local_ts.hour,
+            "session": (
+                f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
+                f"{self.session_timezone}"
+            ),
+            "symbol": self.symbol,
+        }
+        if size_multiplier < 1.0:
+            metadata["size_multiplier"] = size_multiplier
+
         return AgentSignal(
             source_agent=self.name,
             signal_type=fvg.direction,
             confidence=confidence,
             priority=self.priority,
             timestamp=timestamp,
-            metadata={
-                "pattern": fvg.pattern_name,
-                "gap_size_pct": fvg.gap_size * 100,
-                "kill_zone": True,
-                "session": (
-                    f"{self.session_start:02d}:00-{self.session_end:02d}:00 "
-                    f"{self.session_timezone}"
-                ),
-                "symbol": self.symbol,
-            },
+            metadata=metadata,
         )

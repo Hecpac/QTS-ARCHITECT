@@ -1,0 +1,155 @@
+{
+  "generated_at_utc": "2026-02-26T22:48:36.464935+00:00",
+  "instrument": "XAU_USD",
+  "strategy": "longonly_breakout_plus_fvg_8_11_b5",
+  "cases": [
+    {
+      "name": "A_control",
+      "hard_block_minutes_ny": [],
+      "hard_block_pattern_minutes_ny": [],
+      "soft_risk_pattern_minutes_ny": [],
+      "soft_risk_multiplier": 1.0
+    },
+    {
+      "name": "B_hard_embargo",
+      "hard_block_minutes_ny": [
+        "08:45"
+      ],
+      "hard_block_pattern_minutes_ny": [
+        "Session low breakout reversal|09:45"
+      ],
+      "soft_risk_pattern_minutes_ny": [],
+      "soft_risk_multiplier": 1.0
+    },
+    {
+      "name": "C_hard_plus_soft",
+      "hard_block_minutes_ny": [
+        "08:45"
+      ],
+      "hard_block_pattern_minutes_ny": [
+        "Session low breakout reversal|09:45"
+      ],
+      "soft_risk_pattern_minutes_ny": [
+        "Session low breakout reversal|08:15",
+        "Session low breakout reversal|08:30"
+      ],
+      "soft_risk_multiplier": 0.5
+    }
+  ],
+  "results": [
+    {
+      "case": "A_control",
+      "window": "365d_1h",
+      "bars": 5914,
+      "trades": 182,
+      "final_capital": 103360.30626313254,
+      "annualized_return": 0.05018272569682636,
+      "max_drawdown": -0.025435745298929863,
+      "sharpe": 1.4265855095572424,
+      "closed_roundtrips": 118,
+      "wins": 77,
+      "losses": 41,
+      "win_rate": 0.652542372881356,
+      "profit_factor": 1.835098340070197,
+      "expectancy_pnl": 31.424195407902438,
+      "worst_trade": -959.2884784661559,
+      "max_losing_streak": 4,
+      "realized_pnl": 3708.055058132488
+    },
+    {
+      "case": "A_control",
+      "window": "90d_15m",
+      "bars": 5667,
+      "trades": 104,
+      "final_capital": 100074.85009422686,
+      "annualized_return": 0.004637912635868879,
+      "max_drawdown": -0.030226952905238812,
+      "sharpe": 0.11268443533052415,
+      "closed_roundtrips": 67,
+      "wins": 51,
+      "losses": 16,
+      "win_rate": 0.7611940298507462,
+      "profit_factor": 1.1512343387608825,
+      "expectancy_pnl": 4.862784652640422,
+      "worst_trade": -550.5226720563076,
+      "max_losing_streak": 3,
+      "realized_pnl": 325.80657172690826
+    },
+    {
+      "case": "B_hard_embargo",
+      "window": "365d_1h",
+      "bars": 5914,
+      "trades": 182,
+      "final_capital": 103360.30626313254,
+      "annualized_return": 0.05018272569682636,
+      "max_drawdown": -0.025435745298929863,
+      "sharpe": 1.4265855095572424,
+      "closed_roundtrips": 118,
+      "wins": 77,
+      "losses": 41,
+      "win_rate": 0.652542372881356,
+      "profit_factor": 1.835098340070197,
+      "expectancy_pnl": 31.424195407902438,
+      "worst_trade": -959.2884784661559,
+      "max_losing_streak": 4,
+      "realized_pnl": 3708.055058132488
+    },
+    {
+      "case": "B_hard_embargo",
+      "window": "90d_15m",
+      "bars": 5667,
+      "trades": 99,
+      "final_capital": 101437.41609320862,
+      "annualized_return": 0.09227281555635192,
+      "max_drawdown": -0.01782996491969147,
+      "sharpe": 1.9294576049308658,
+      "closed_roundtrips": 63,
+      "wins": 50,
+      "losses": 13,
+      "win_rate": 0.7936507936507936,
+      "profit_factor": 2.2972484768607964,
+      "expectancy_pnl": 26.608948265217432,
+      "worst_trade": -335.7059515471197,
+      "max_losing_streak": 3,
+      "realized_pnl": 1676.3637407086983
+    },
+    {
+      "case": "C_hard_plus_soft",
+      "window": "365d_1h",
+      "bars": 5914,
+      "trades": 182,
+      "final_capital": 103360.30626313254,
+      "annualized_return": 0.05018272569682636,
+      "max_drawdown": -0.025435745298929863,
+      "sharpe": 1.4265855095572424,
+      "closed_roundtrips": 118,
+      "wins": 77,
+      "losses": 41,
+      "win_rate": 0.652542372881356,
+      "profit_factor": 1.835098340070197,
+      "expectancy_pnl": 31.424195407902438,
+      "worst_trade": -959.2884784661559,
+      "max_losing_streak": 4,
+      "realized_pnl": 3708.055058132488
+    },
+    {
+      "case": "C_hard_plus_soft",
+      "window": "90d_15m",
+      "bars": 5667,
+      "trades": 104,
+      "final_capital": 101850.8448578986,
+      "annualized_return": 0.12009627967357384,
+      "max_drawdown": -0.008710254924528652,
+      "sharpe": 3.0599702513174942,
+      "closed_roundtrips": 68,
+      "wins": 56,
+      "losses": 12,
+      "win_rate": 0.8235294117647058,
+      "profit_factor": 3.4341227455618446,
+      "expectancy_pnl": 30.911102763214753,
+      "worst_trade": -280.3659575381572,
+      "max_losing_streak": 3,
+      "realized_pnl": 2101.954987898603
+    }
+  ]
+}
