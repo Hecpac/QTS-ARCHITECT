@@ -1,0 +1,63 @@
+{
+  "generated_at_utc": "2026-02-26T19:38:49.625500+00:00",
+  "symbol": "XAUT/USDT",
+  "exchange": "okx",
+  "timeframe": "1h",
+  "bars": 8760,
+  "start": "2025-02-26 20:00:00+00:00",
+  "end": "2026-02-26 19:00:00+00:00",
+  "rows": [
+    {
+      "name": "baseline_no_guard",
+      "bars": 8760,
+      "trades": 7,
+      "guarded_trades": 0,
+      "final_capital": 112216.99511210812,
+      "pnl": 12216.995112108125,
+      "total_return": 0.12216995112104434,
+      "annualized_return": 0.12218471844016521,
+      "sharpe": 2.2591798459003503,
+      "max_drawdown": -0.051636118450320005,
+      "borrow_fees_paid": 13.311767279445235
+    },
+    {
+      "name": "dynamic_extreme_scale_z2.5",
+      "bars": 8760,
+      "trades": 7,
+      "guarded_trades": 0,
+      "final_capital": 112216.99511210812,
+      "pnl": 12216.995112108125,
+      "total_return": 0.12216995112104434,
+      "annualized_return": 0.12218471844016521,
+      "sharpe": 2.2591798459003503,
+      "max_drawdown": -0.051636118450320005,
+      "borrow_fees_paid": 13.311767279445235
+    },
+    {
+      "name": "dynamic_extreme_block_z2.5",
+      "bars": 8760,
+      "trades": 7,
+      "guarded_trades": 0,
+      "final_capital": 112216.99511210812,
+      "pnl": 12216.995112108125,
+      "total_return": 0.12216995112104434,
+      "annualized_return": 0.12218471844016521,
+      "sharpe": 2.2591798459003503,
+      "max_drawdown": -0.051636118450320005,
+      "borrow_fees_paid": 13.311767279445235
+    }
+  ],
+  "best_by_annualized_return": {
+    "name": "baseline_no_guard",
+    "bars": 8760,
+    "trades": 7,
+    "guarded_trades": 0,
+    "final_capital": 112216.99511210812,
+    "pnl": 12216.995112108125,
+    "total_return": 0.12216995112104434,
+    "annualized_return": 0.12218471844016521,
+    "sharpe": 2.2591798459003503,
+    "max_drawdown": -0.051636118450320005,
+    "borrow_fees_paid": 13.311767279445235
+  }
+}
