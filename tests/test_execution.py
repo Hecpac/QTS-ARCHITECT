@@ -14,14 +14,18 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from omegaconf import OmegaConf
 
 from qts_core.agents.protocol import SignalType, TradingDecision
+from qts_core.common.types import InstrumentId, MarketData
+from qts_core.main_live import LiveTrader
 from qts_core.execution import (
     AccountMode,
     CCXTGateway,
     CircuitBreaker,
     CircuitOpenError,
     CircuitState,
+    ExecutionError,
     ExecutionStatus,
     FillReport,
     GatewayNotStartedError,
@@ -1041,6 +1045,180 @@ class _FakeExchangeForReconcile:
         return self.orders[order_id]
 
 
+class _LiveNoFillGateway:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def submit_order(self, order: OrderRequest) -> FillReport | None:  # noqa: ARG002
+        return None
+
+    def health_check(self) -> bool:
+        return True
+
+
+class _LiveTimeoutGateway:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def submit_order(self, order: OrderRequest) -> FillReport | None:  # noqa: ARG002
+        await asyncio.sleep(0.2)
+        return None
+
+    def health_check(self) -> bool:
+        return True
+
+
+class _LiveHardRejectGateway:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def submit_order(self, order: OrderRequest) -> FillReport | None:  # noqa: ARG002
+        raise ExecutionError("hard reject", recoverable=False)
+
+    def health_check(self) -> bool:
+        return True
+
+
+class _LiveAmbiguousGateway:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def submit_order(self, order: OrderRequest) -> FillReport | None:  # noqa: ARG002
+        raise ExecutionError("ambiguous exchange error", recoverable=True)
+
+    def health_check(self) -> bool:
+        return True
+
+
+class _LiveFilledGateway:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def submit_order(self, order: OrderRequest) -> FillReport | None:
+        return FillReport(
+            oms_order_id=order.oms_order_id,
+            exchange_order_id="exchange-order-1",
+            exchange_trade_id="exchange-trade-1",
+            price=100.0,
+            quantity=order.quantity,
+            fee=0.0,
+            status=ExecutionStatus.SUCCESS,
+        )
+
+    def health_check(self) -> bool:
+        return True
+
+
+def _build_live_trader_for_execution_tests(gateway: object) -> LiveTrader:
+    cfg = OmegaConf.create(
+        {
+            "env": "test",
+            "symbol": "BTC/USDT",
+            "oms": {
+                "initial_cash": 100_000.0,
+                "risk_fraction": 0.10,
+                "account_mode": "spot",
+                "short_leverage": 1.0,
+            },
+            "agents": {
+                "strategies": [
+                    {
+                        "_target_": "qts_core.agents.base.TechnicalAgent",
+                        "name": "TrendFollower_A",
+                        "min_confidence": 0.0,
+                    }
+                ],
+                "risk": {
+                    "_target_": "qts_core.agents.base.StrictRiskAgent",
+                    "name": "Risk",
+                },
+            },
+            "store": {"_target_": "qts_core.execution.store.MemoryStore"},
+            "gateway": {
+                "_target_": "qts_core.execution.ems.MockGateway",
+                "default_price": 100.0,
+                "latency_ms": 1.0,
+                "failure_rate": 0.0,
+                "partial_fill_rate": 0.0,
+            },
+            "loop": {
+                "tick_interval": 0.01,
+                "heartbeat_key": "SYSTEM:HEARTBEAT",
+                "execution_timeout": 0.05,
+            },
+            "execution_guardrails": {"enabled": False},
+            "alerts": {
+                "enabled": True,
+                "last_key": "ALERTS:LAST",
+                "event_prefix": "ALERTS:EVENT",
+            },
+            "telemetry": {
+                "publish_views": False,
+                "metrics_keys": {
+                    "total_value": "METRICS:TOTAL_VALUE",
+                    "cash": "METRICS:CASH",
+                    "pnl_daily": "METRICS:PNL_DAILY",
+                },
+                "latency_keys": {
+                    "tick_to_decision_ms": "METRICS:LATENCY:TICK_TO_DECISION_MS",
+                    "decision_to_fill_ms": "METRICS:LATENCY:DECISION_TO_FILL_MS",
+                    "tick_to_fill_ms": "METRICS:LATENCY:TICK_TO_FILL_MS",
+                },
+            },
+        }
+    )
+
+    trader = LiveTrader(cfg)
+    trader.ems = gateway  # type: ignore[assignment]
+    trader.symbol = "BTC/USDT"
+    trader.symbols = ["BTC/USDT"]
+    return trader
+
+
+async def _run_forced_long_tick(trader: LiveTrader) -> None:
+    instrument = InstrumentId("BTC/USDT")
+    market_data = MarketData(
+        instrument_id=instrument,
+        timestamp=datetime.now(timezone.utc),
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=101.0,
+        volume=5.0,
+    )
+
+    async def _fake_fetch_live_data() -> MarketData:
+        return market_data
+
+    async def _fake_supervisor_run(*_args, **_kwargs) -> TradingDecision:
+        return TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="wave2_live_semantics_test",
+        )
+
+    trader._fetch_live_data = _fake_fetch_live_data  # type: ignore[method-assign]
+    trader.supervisor.run = _fake_supervisor_run  # type: ignore[method-assign]
+
+    await trader._process_symbol_tick("BTC/USDT")
+
+
 class TestCCXTGatewayPayload:
     """Tests for CCXT order payload assembly."""
 
@@ -1159,6 +1337,142 @@ class TestCCXTGatewayPayload:
         assert fill is not None
         assert fill.price == pytest.approx(50_000.0)
         assert fill.quantity == pytest.approx(0.1)
+
+    @pytest.mark.asyncio
+    async def test_parse_response_prefers_exchange_trade_id(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.MARGIN,
+        )
+        gateway.exchange = _FakeExchangeForParse(
+            {"filled": 0.1, "average": 50_000.0, "tradeId": "trade-123"}
+        )
+
+        order = OrderRequest(
+            oms_order_id="test-trade-id",
+            instrument_id="BTC/USDT",
+            side=OrderSide.BUY,
+            intent=OrderIntent.OPEN_LONG,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+        )
+
+        fill = await gateway._parse_response(
+            order,
+            {
+                "id": "ex-3",
+                "filled": 0.1,
+                "average": 50_000.0,
+                "tradeId": "trade-123",
+            },
+            "BTC/USDT",
+        )
+
+        assert fill is not None
+        assert fill.exchange_trade_id == "trade-123"
+        assert fill.exchange_trade_id != fill.exchange_order_id
+
+    @pytest.mark.asyncio
+    async def test_parse_response_raises_on_hard_reject_status(self) -> None:
+        gateway = CCXTGateway(
+            exchange_name="kraken",
+            paper_trading=True,
+            account_mode=AccountMode.MARGIN,
+        )
+        gateway.exchange = _FakeExchangeForParse({"status": "rejected"})
+
+        order = OrderRequest(
+            oms_order_id="test-rejected",
+            instrument_id="BTC/USDT",
+            side=OrderSide.BUY,
+            intent=OrderIntent.OPEN_LONG,
+            quantity=0.1,
+            order_type=OrderType.MARKET,
+        )
+
+        with pytest.raises(ExecutionError) as exc_info:
+            await gateway._parse_response(
+                order,
+                {"id": "ex-reject", "status": "rejected"},
+                "BTC/USDT",
+            )
+
+        assert exc_info.value.recoverable is False
+
+
+class TestLiveSubmissionSemantics:
+    @pytest.mark.asyncio
+    async def test_no_fill_report_keeps_order_open_and_triggers_reconcile(self) -> None:
+        trader = _build_live_trader_for_execution_tests(_LiveNoFillGateway())
+
+        await _run_forced_long_tick(trader)
+
+        open_orders = trader.oms.get_open_orders()
+        assert len(open_orders) == 1
+        assert open_orders[0].status == OrderStatus.SUBMITTED
+        assert trader.oms.portfolio.blocked_cash > 0
+
+        payload = trader.store.get("ALERTS:LAST")
+        assert payload is not None
+        assert "OMS_RECONCILE_AMBIGUOUS" in payload
+
+    @pytest.mark.asyncio
+    async def test_timeout_keeps_order_open_and_triggers_reconcile(self) -> None:
+        trader = _build_live_trader_for_execution_tests(_LiveTimeoutGateway())
+
+        await _run_forced_long_tick(trader)
+
+        open_orders = trader.oms.get_open_orders()
+        assert len(open_orders) == 1
+        assert open_orders[0].status == OrderStatus.SUBMITTED
+        assert trader.oms.portfolio.blocked_cash > 0
+
+        payload = trader.store.get("ALERTS:LAST")
+        assert payload is not None
+        assert "OMS_RECONCILE_AMBIGUOUS" in payload
+
+    @pytest.mark.asyncio
+    async def test_hard_reject_reverts_allocation(self) -> None:
+        trader = _build_live_trader_for_execution_tests(_LiveHardRejectGateway())
+
+        await _run_forced_long_tick(trader)
+
+        assert trader.oms.portfolio.blocked_cash == pytest.approx(0.0)
+        assert trader.oms.portfolio.cash == pytest.approx(100_000.0)
+        assert len(trader.oms.get_open_orders()) == 0
+
+        payload = trader.store.get("ALERTS:LAST")
+        assert payload is not None
+        assert "ORDER_SUBMISSION_REJECTED" in payload
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_execution_error_preserves_reservation(self) -> None:
+        trader = _build_live_trader_for_execution_tests(_LiveAmbiguousGateway())
+
+        await _run_forced_long_tick(trader)
+
+        open_orders = trader.oms.get_open_orders()
+        assert len(open_orders) == 1
+        assert open_orders[0].status == OrderStatus.SUBMITTED
+        assert trader.oms.portfolio.blocked_cash > 0
+
+        payload = trader.store.get("ALERTS:LAST")
+        assert payload is not None
+        assert "OMS_RECONCILE_AMBIGUOUS" in payload
+
+    @pytest.mark.asyncio
+    async def test_live_flow_uses_exchange_trade_id_for_idempotency(self) -> None:
+        trader = _build_live_trader_for_execution_tests(_LiveFilledGateway())
+
+        await _run_forced_long_tick(trader)
+
+        order_keys = trader.oms._iter_order_keys()  # noqa: SLF001 - test introspection
+        assert order_keys
+
+        persisted_order = trader.store.load(order_keys[0], Order)
+        assert persisted_order is not None
+        assert persisted_order.applied_fill_ids == ["exchange-trade-1"]
 
 
 # ==============================================================================

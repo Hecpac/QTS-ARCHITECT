@@ -19,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.agents.supervisor import Supervisor
 from qts_core.common.types import InstrumentId, MarketData
+from qts_core.execution.ems import ExecutionError, ExecutionStatus
 from qts_core.execution.oms import OrderManagementSystem, OrderRequest
 
 
@@ -524,6 +525,18 @@ class LiveTrader:
             seconds=self.entry_cooldown_seconds
         )
 
+    @staticmethod
+    def _resolve_fill_trade_id(fill_report: FillReport) -> str | None:
+        if fill_report.exchange_trade_id:
+            return fill_report.exchange_trade_id
+        if fill_report.exchange_order_id:
+            return (
+                f"{fill_report.exchange_order_id}:"
+                f"{fill_report.timestamp.timestamp():.6f}:"
+                f"{fill_report.quantity:.12f}"
+            )
+        return None
+
     def _record_order_view(
         self,
         order_request: OrderRequest,
@@ -540,7 +553,8 @@ class LiveTrader:
                 "price": fill_report.price,
                 "fee": fill_report.fee,
                 "exchange_order_id": fill_report.exchange_order_id,
-                "status": "FILLED",
+                "exchange_trade_id": self._resolve_fill_trade_id(fill_report),
+                "status": fill_report.status.value,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -909,13 +923,35 @@ class LiveTrader:
                     order_id=order_request.oms_order_id,
                 )
                 continue
+            except ExecutionError as exc:
+                if exc.recoverable:
+                    log.warning(
+                        "Halt liquidation had ambiguous submission error; preserving reservation",
+                        order_id=order_request.oms_order_id,
+                        error=str(exc),
+                    )
+                    await self._reconcile_after_ambiguous_submission(
+                        reason="halt_liquidation_ambiguous_error",
+                        order_id=order_request.oms_order_id,
+                    )
+                else:
+                    log.error(
+                        "Halt liquidation hard rejected; reverting allocation",
+                        order_id=order_request.oms_order_id,
+                        error=str(exc),
+                    )
+                    self.oms.revert_allocation(order_request.oms_order_id)
+                continue
             except Exception as exc:
                 log.error(
-                    "Halt liquidation submission failed; reverting allocation",
+                    "Halt liquidation submission failed; preserving reservation for reconciliation",
                     order_id=order_request.oms_order_id,
                     error=str(exc),
                 )
-                self.oms.revert_allocation(order_request.oms_order_id)
+                await self._reconcile_after_ambiguous_submission(
+                    reason="halt_liquidation_submit_exception",
+                    order_id=order_request.oms_order_id,
+                )
                 continue
 
             if fill_report is None:
@@ -929,13 +965,33 @@ class LiveTrader:
                 )
                 continue
 
+            if fill_report.status in {
+                ExecutionStatus.REJECTED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CIRCUIT_OPEN,
+            }:
+                log.error(
+                    "Halt liquidation hard rejected by gateway; reverting allocation",
+                    order_id=order_request.oms_order_id,
+                    status=fill_report.status.value,
+                )
+                self.oms.revert_allocation(order_request.oms_order_id)
+                continue
+
+            if fill_report.status == ExecutionStatus.TIMEOUT:
+                await self._reconcile_after_ambiguous_submission(
+                    reason="halt_liquidation_timeout_status",
+                    order_id=order_request.oms_order_id,
+                )
+                continue
+
             try:
                 self.oms.confirm_execution(
                     oms_order_id=fill_report.oms_order_id,
                     fill_price=fill_report.price,
                     fill_qty=fill_report.quantity,
                     fee=fill_report.fee,
-                    exchange_trade_id=fill_report.exchange_order_id,
+                    exchange_trade_id=self._resolve_fill_trade_id(fill_report),
                     exchange_order_id=fill_report.exchange_order_id,
                 )
             except Exception as exc:
@@ -1201,6 +1257,50 @@ class LiveTrader:
                 order_id=order_request.oms_order_id,
             )
             return
+        except ExecutionError as exc:
+            self._publish_latency_metrics(
+                decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
+                tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
+                symbol=instrument_symbol,
+            )
+            if exc.recoverable:
+                log.warning(
+                    "Order submission returned ambiguous error; preserving reservation",
+                    error=str(exc),
+                    order_id=order_request.oms_order_id,
+                )
+                self._emit_alert(
+                    level="WARNING",
+                    event="ORDER_SUBMISSION_AMBIGUOUS",
+                    message="Order submission failed with ambiguous outcome",
+                    details={
+                        "order_id": order_request.oms_order_id,
+                        "error": str(exc),
+                        "symbol": instrument_symbol,
+                    },
+                )
+                await self._reconcile_after_ambiguous_submission(
+                    reason="submit_ambiguous_error",
+                    order_id=order_request.oms_order_id,
+                )
+            else:
+                log.error(
+                    "Order hard rejected; reverting allocation",
+                    error=str(exc),
+                    order_id=order_request.oms_order_id,
+                )
+                self._emit_alert(
+                    level="ERROR",
+                    event="ORDER_SUBMISSION_REJECTED",
+                    message="Order submission was hard rejected",
+                    details={
+                        "order_id": order_request.oms_order_id,
+                        "error": str(exc),
+                        "symbol": instrument_symbol,
+                    },
+                )
+                self.oms.revert_allocation(order_request.oms_order_id)
+            return
         except Exception as exc:
             self._publish_latency_metrics(
                 decision_to_fill_ms=(time.monotonic() - submit_started_at) * 1000.0,
@@ -1208,21 +1308,24 @@ class LiveTrader:
                 symbol=instrument_symbol,
             )
             log.error(
-                "Order Submission Failed",
+                "Order submission raised unexpected exception; preserving reservation",
                 error=str(exc),
                 order_id=order_request.oms_order_id,
             )
             self._emit_alert(
-                level="ERROR",
-                event="ORDER_SUBMISSION_FAILED",
-                message="Order submission raised an exception",
+                level="WARNING",
+                event="ORDER_SUBMISSION_EXCEPTION",
+                message="Unexpected submission exception; reconciliation triggered",
                 details={
                     "order_id": order_request.oms_order_id,
                     "error": str(exc),
                     "symbol": instrument_symbol,
                 },
             )
-            self.oms.revert_allocation(order_request.oms_order_id)
+            await self._reconcile_after_ambiguous_submission(
+                reason="submit_exception",
+                order_id=order_request.oms_order_id,
+            )
             return
 
         if fill_report:
@@ -1231,13 +1334,53 @@ class LiveTrader:
                 tick_to_fill_ms=(time.monotonic() - tick_started_at) * 1000.0,
                 symbol=instrument_symbol,
             )
+
+            if fill_report.status in {
+                ExecutionStatus.REJECTED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CIRCUIT_OPEN,
+            }:
+                log.error(
+                    "Order hard rejected in fill report; reverting allocation",
+                    order_id=order_request.oms_order_id,
+                    status=fill_report.status.value,
+                )
+                self._emit_alert(
+                    level="ERROR",
+                    event="ORDER_REJECTED",
+                    message="Gateway returned hard reject status",
+                    details={
+                        "order_id": order_request.oms_order_id,
+                        "status": fill_report.status.value,
+                        "symbol": instrument_symbol,
+                    },
+                )
+                self.oms.revert_allocation(order_request.oms_order_id)
+                return
+
+            if fill_report.status == ExecutionStatus.TIMEOUT:
+                self._emit_alert(
+                    level="WARNING",
+                    event="ORDER_TIMEOUT_STATUS",
+                    message="Gateway returned timeout status; reconciliation triggered",
+                    details={
+                        "order_id": order_request.oms_order_id,
+                        "symbol": instrument_symbol,
+                    },
+                )
+                await self._reconcile_after_ambiguous_submission(
+                    reason="fill_timeout_status",
+                    order_id=order_request.oms_order_id,
+                )
+                return
+
             try:
                 self.oms.confirm_execution(
                     oms_order_id=fill_report.oms_order_id,
                     fill_price=fill_report.price,
                     fill_qty=fill_report.quantity,
                     fee=fill_report.fee,
-                    exchange_trade_id=fill_report.exchange_order_id,
+                    exchange_trade_id=self._resolve_fill_trade_id(fill_report),
                     exchange_order_id=fill_report.exchange_order_id,
                 )
             except Exception as exc:

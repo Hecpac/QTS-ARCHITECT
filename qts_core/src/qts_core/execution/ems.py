@@ -122,6 +122,7 @@ class FillReport(BaseModel):
 
     oms_order_id: str
     exchange_order_id: str | None = None
+    exchange_trade_id: str | None = None
     price: PositiveFloat
     quantity: PositiveFloat
     fee: float = Field(default=0.0, ge=0)
@@ -510,7 +511,7 @@ class CCXTGateway:
                 "Order rejected: rate limit exceeded",
                 order_id=order.oms_order_id,
             )
-            return None
+            raise ExecutionError("Rate limit exceeded", recoverable=False)
 
         # Paper trading: simulate fill
         if self.paper_trading:
@@ -519,16 +520,28 @@ class CCXTGateway:
         # Real execution
         try:
             fill = await self._execute_with_retry(order)
-            self._circuit_breaker.record_success()
-            return fill
+        except ExecutionError:
+            self._circuit_breaker.record_failure()
+            raise
         except Exception as e:
             self._circuit_breaker.record_failure()
             log.error(
-                "Order execution failed",
+                "Order execution failed with ambiguous outcome",
                 order_id=order.oms_order_id,
                 error=str(e),
             )
+            raise ExecutionError(str(e), recoverable=True) from e
+
+        if fill is None:
+            self._circuit_breaker.record_failure()
+            log.warning(
+                "Order execution returned no fill report",
+                order_id=order.oms_order_id,
+            )
             return None
+
+        self._circuit_breaker.record_success()
+        return fill
 
     async def _simulate_fill(self, order: OrderRequest) -> FillReport:
         """Simulate fill for paper trading."""
@@ -551,6 +564,7 @@ class CCXTGateway:
 
         return FillReport(
             oms_order_id=order.oms_order_id,
+            exchange_trade_id=f"paper:{order.oms_order_id}",
             price=max(price, 0.01),  # Ensure positive
             quantity=order.quantity,
             fee=0.0,
@@ -573,6 +587,44 @@ class CCXTGateway:
             params["reduceOnly"] = True
 
         return symbol, order_type, side, amount, price, params
+
+    @staticmethod
+    def _extract_exchange_trade_id(response: dict) -> str | None:
+        """Extract best-effort unique trade ID from exchange response."""
+        candidates = [
+            response.get("trade_id"),
+            response.get("tradeId"),
+            response.get("lastTradeId"),
+            response.get("last_trade_id"),
+            response.get("fill_id"),
+        ]
+
+        info = response.get("info")
+        if isinstance(info, dict):
+            candidates.extend(
+                [
+                    info.get("trade_id"),
+                    info.get("tradeId"),
+                    info.get("lastTradeId"),
+                    info.get("last_trade_id"),
+                    info.get("fill_id"),
+                ]
+            )
+
+        for value in candidates:
+            if value not in (None, ""):
+                return str(value)
+
+        trades = response.get("trades")
+        if isinstance(trades, list):
+            for trade in reversed(trades):
+                if not isinstance(trade, dict):
+                    continue
+                trade_id = trade.get("id") or trade.get("trade_id") or trade.get("tradeId")
+                if trade_id not in (None, ""):
+                    return str(trade_id)
+
+        return None
 
     async def _execute_with_retry(self, order: OrderRequest) -> FillReport | None:
         """Execute order with retry logic."""
@@ -625,8 +677,25 @@ class CCXTGateway:
                 error=str(e),
             )
             return None
+        except ccxt.InvalidOrder as exc:
+            raise ExecutionError(str(exc), recoverable=False) from exc
+        except (
+            ccxt.AuthenticationError,
+            ccxt.PermissionDenied,
+            ccxt.BadRequest,
+        ) as exc:
+            raise ExecutionError(str(exc), recoverable=False) from exc
+        except (
+            ccxt.NetworkError,
+            ccxt.RateLimitExceeded,
+            ccxt.ExchangeNotAvailable,
+            ccxt.RequestTimeout,
+        ) as exc:
+            raise ExecutionError(str(exc), recoverable=True) from exc
+        except ccxt.BaseError as exc:
+            raise ExecutionError(str(exc), recoverable=False) from exc
 
-        return self._parse_response(order, response, symbol)
+        return await self._parse_response(order, response, symbol)
 
     async def _parse_response(
         self,
@@ -635,23 +704,43 @@ class CCXTGateway:
         symbol: str,
     ) -> FillReport | None:
         """Parse exchange response into FillReport."""
+        exchange_order_id = response.get("id")
+        response_status = str(response.get("status") or "").lower()
+
+        if response_status in {"rejected", "canceled", "cancelled", "expired"}:
+            raise ExecutionError(
+                f"Exchange rejected order with status={response_status}",
+                recoverable=False,
+            )
+
         fill_price = response.get("price") or response.get("average")
         filled = response.get("filled")
 
         # Fetch order if needed
         if fill_price is None or filled is None:
-            order_id = response.get("id")
+            order_id = exchange_order_id
             if order_id:
                 try:
                     fetched = await self.exchange.fetch_order(order_id, symbol)
-                    fill_price = fill_price or fetched.get("average") or fetched.get("price")
-                    filled = filled or fetched.get("filled")
+                    if isinstance(fetched, dict):
+                        response = {**response, **fetched}
+                        exchange_order_id = response.get("id") or exchange_order_id
+                        response_status = str(response.get("status") or response_status).lower()
+                        fill_price = fill_price or response.get("average") or response.get("price")
+                        filled = filled if filled is not None else response.get("filled")
                 except Exception as e:
                     log.warning("Could not fetch order details", error=str(e))
 
+        if response_status in {"rejected", "canceled", "cancelled", "expired"}:
+            raise ExecutionError(
+                f"Exchange rejected order with status={response_status}",
+                recoverable=False,
+            )
+
         if filled is None:
-            log.error(
-                "Exchange did not return filled quantity",
+            log.warning(
+                "Exchange did not return filled quantity; treating as ambiguous",
+                order_id=order.oms_order_id,
                 response=response,
             )
             return None
@@ -659,7 +748,7 @@ class CCXTGateway:
         try:
             parsed_fill_qty = float(filled)
         except (TypeError, ValueError):
-            log.error(
+            log.warning(
                 "Exchange returned non-numeric filled quantity",
                 filled=filled,
                 order_id=order.oms_order_id,
@@ -667,16 +756,17 @@ class CCXTGateway:
             return None
 
         if parsed_fill_qty <= 0:
-            log.error(
-                "Exchange returned non-positive filled quantity",
-                filled=parsed_fill_qty,
+            log.info(
+                "Order acknowledged with no fills yet",
                 order_id=order.oms_order_id,
+                exchange_order_id=exchange_order_id,
+                status=response_status or "unknown",
             )
             return None
 
         if fill_price is None:
-            log.error(
-                "Exchange did not return fill price",
+            log.warning(
+                "Exchange did not return fill price; treating as ambiguous",
                 order_id=order.oms_order_id,
                 response_keys=sorted(response.keys()),
             )
@@ -685,7 +775,7 @@ class CCXTGateway:
         try:
             parsed_fill_price = float(fill_price)
         except (TypeError, ValueError):
-            log.error(
+            log.warning(
                 "Exchange returned non-numeric fill price",
                 fill_price=fill_price,
                 order_id=order.oms_order_id,
@@ -693,7 +783,7 @@ class CCXTGateway:
             return None
 
         if parsed_fill_price <= 0:
-            log.error(
+            log.warning(
                 "Exchange returned non-positive fill price",
                 fill_price=parsed_fill_price,
                 order_id=order.oms_order_id,
@@ -707,9 +797,20 @@ class CCXTGateway:
             fee_cost = response["fee"].get("cost", 0.0) or 0.0
             fee_currency = response["fee"].get("currency")
 
+        trade_id = self._extract_exchange_trade_id(response)
+        if trade_id is None and exchange_order_id is not None:
+            ts_component = (
+                response.get("lastTradeTimestamp")
+                or response.get("last_trade_timestamp")
+                or response.get("timestamp")
+                or int(datetime.now(timezone.utc).timestamp() * 1000)
+            )
+            trade_id = f"{exchange_order_id}:{ts_component}:{parsed_fill_qty:.12f}"
+
         return FillReport(
             oms_order_id=order.oms_order_id,
-            exchange_order_id=response.get("id"),
+            exchange_order_id=str(exchange_order_id) if exchange_order_id is not None else None,
+            exchange_trade_id=trade_id,
             price=parsed_fill_price,
             quantity=parsed_fill_qty,
             fee=fee_cost,
@@ -894,6 +995,23 @@ class AlpacaGateway:
         """Return CCXT-compatible exchange interface."""
         return self._exchange_proxy
 
+    @staticmethod
+    def _build_alpaca_trade_id(alpaca_order: object, exchange_order_id: str, filled_qty: float) -> str:
+        """Build best-effort unique fill identifier for Alpaca."""
+        direct_trade_id = getattr(alpaca_order, "trade_id", None)
+        if direct_trade_id not in (None, ""):
+            return str(direct_trade_id)
+
+        filled_at = getattr(alpaca_order, "filled_at", None)
+        if filled_at:
+            return f"{exchange_order_id}:{filled_at}:{filled_qty:.12f}"
+
+        updated_at = getattr(alpaca_order, "updated_at", None)
+        if updated_at:
+            return f"{exchange_order_id}:{updated_at}:{filled_qty:.12f}"
+
+        return f"{exchange_order_id}:{filled_qty:.12f}"
+
     async def submit_order(self, order: OrderRequest) -> FillReport | None:
         """Submit order to Alpaca."""
         from alpaca.trading.enums import OrderSide, TimeInForce
@@ -906,13 +1024,12 @@ class AlpacaGateway:
             raise CircuitOpenError(self._circuit_breaker.time_until_reset())
 
         if not await self._rate_limiter.acquire():
-            return None
+            raise ExecutionError("Rate limit exceeded", recoverable=False)
 
         # Map side
         side = OrderSide.BUY if order.side.value == "BUY" else OrderSide.SELL
 
         # Map type and create request
-        req = None
         if order.order_type.value == "MARKET":
             req = MarketOrderRequest(
                 symbol=str(order.instrument_id),
@@ -923,8 +1040,7 @@ class AlpacaGateway:
             )
         elif order.order_type.value == "LIMIT":
             if order.limit_price is None:
-                log.error("Limit price required for LIMIT order")
-                return None
+                raise ExecutionError("Limit price required for LIMIT order", recoverable=False)
             req = LimitOrderRequest(
                 symbol=str(order.instrument_id),
                 qty=order.quantity,
@@ -934,80 +1050,89 @@ class AlpacaGateway:
                 client_order_id=order.oms_order_id,
             )
         else:
-            log.error("Unsupported order type", type=order.order_type)
-            return None
+            raise ExecutionError(
+                f"Unsupported order type: {order.order_type}",
+                recoverable=False,
+            )
 
         try:
             # Note: client.submit_order is synchronous in alpaca-py,
             # but usually fast enough. For high throughput, we'd wrap in run_in_executor.
             alpaca_order = await asyncio.to_thread(
-                self._client.submit_order, order_data=req
+                self._client.submit_order,
+                order_data=req,
             )
-            self._circuit_breaker.record_success()
 
-            # Alpaca returns an Order object immediately, but it might not be filled yet.
-            # QTS expects a FillReport immediately for simplicity in this version,
-            # or we simulate one if it's pending.
-            # Real implementation would poll or wait for fill.
-            # Here we assume immediate fill for market orders or partial for limit if crossed.
-            # But Alpaca orders are async.
-            # We will return a FillReport with status based on the response.
+            order_status = str(getattr(alpaca_order, "status", "")).lower()
+            if order_status in {"rejected", "canceled", "cancelled", "expired"}:
+                raise ExecutionError(
+                    f"Alpaca rejected order with status={order_status}",
+                    recoverable=False,
+                )
+
+            exchange_order_id = str(getattr(alpaca_order, "id"))
+
+            filled_raw = getattr(alpaca_order, "filled_qty", None)
+            try:
+                filled_qty = float(filled_raw or 0.0)
+            except (TypeError, ValueError):
+                filled_qty = 0.0
+
+            # Submission acknowledged but no confirmed fills yet.
+            if filled_qty <= 0:
+                log.warning(
+                    "Alpaca order acknowledged without fills; treating as ambiguous",
+                    order_id=order.oms_order_id,
+                    exchange_order_id=exchange_order_id,
+                    status=order_status or "unknown",
+                )
+                self._circuit_breaker.record_success()
+                return None
+
+            price_raw = getattr(alpaca_order, "filled_avg_price", None)
+            price = float(price_raw) if price_raw is not None else float(order.limit_price or 0.0)
+            if price <= 0:
+                log.warning(
+                    "Alpaca fill missing valid average price; treating as ambiguous",
+                    order_id=order.oms_order_id,
+                    exchange_order_id=exchange_order_id,
+                    filled_qty=filled_qty,
+                )
+                self._circuit_breaker.record_success()
+                return None
 
             status = (
                 ExecutionStatus.SUCCESS
-                if alpaca_order.status == "filled"
+                if filled_qty >= order.quantity
                 else ExecutionStatus.PARTIAL
             )
-            # If accepted/new, we might not have fill price yet.
-            # We'll use the filled_avg_price if available, else current price or limit price.
-            price = (
-                float(alpaca_order.filled_avg_price)
-                if alpaca_order.filled_avg_price
-                else (order.limit_price or 0.0)
-            )
-            # If price is still 0 (e.g. market order accepted but not filled),
-            # we need to handle this.
-            # QTS OMS currently expects a price for accounting.
-            # We might need to fetch a quote if it's 0.
-            if price <= 0:
-                # Fallback to fetching latest trade/quote
-                try:
-                    # Not efficient but safe for accounting
-                    # In real HFT we rely on separate trade stream
-                    pass
-                except:
-                    pass
 
-            # NOTE: For this integration, we assume fills happen or we report what we have.
-            # If qty filled is 0, status should reflect that.
-            filled_qty = float(alpaca_order.filled_qty)
-            if filled_qty == 0:
-                # It's an open order.
-                # In QTS architecture, if submit_order returns a report, it implies *some* action.
-                # If it returns an open order with 0 fills, the OMS might need to track it.
-                # For now, let's treat it as a successful submission but wait for fill via reconciliation
-                # or just return None if we strictly require fills in this loop?
-                # No, main_live expects a FillReport to confirm execution.
-                # If we return None, it reverts allocation.
-                # So for async exchanges like Alpaca where fill isn't instant in response,
-                # we need to wait a bit or handle "Ack" vs "Fill".
-                # Let's try to wait briefly for fill if it's a market order.
-                pass
-
+            self._circuit_breaker.record_success()
             return FillReport(
                 oms_order_id=order.oms_order_id,
-                exchange_order_id=str(alpaca_order.id),
-                price=max(price, 0.01),
-                quantity=float(alpaca_order.qty),  # Reported qty submitted
-                fee=0.0,  # Alpaca doesn't return fee in order object usually
-                status=ExecutionStatus.SUCCESS,  # Assume success for submission
+                exchange_order_id=exchange_order_id,
+                exchange_trade_id=self._build_alpaca_trade_id(
+                    alpaca_order,
+                    exchange_order_id,
+                    filled_qty,
+                ),
+                price=price,
+                quantity=filled_qty,
+                fee=0.0,
+                status=status,
                 timestamp=datetime.now(timezone.utc),
             )
 
+        except ExecutionError as e:
+            if e.recoverable:
+                self._circuit_breaker.record_failure()
+            else:
+                self._circuit_breaker.record_success()
+            raise
         except Exception as e:
             self._circuit_breaker.record_failure()
             log.error("Alpaca order failed", error=str(e))
-            return None
+            raise ExecutionError(str(e), recoverable=True) from e
 
 
 class RoutingExchangeProxy:
@@ -1161,6 +1286,7 @@ class MockGateway:
         return FillReport(
             oms_order_id=order.oms_order_id,
             exchange_order_id=f"mock-{self._order_count}",
+            exchange_trade_id=f"mock-fill-{self._order_count}",
             price=self.default_price,
             quantity=fill_qty,
             fee=0.0,
