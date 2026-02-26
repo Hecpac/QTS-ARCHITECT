@@ -119,6 +119,14 @@ class BacktestConfig(BaseModel):
     high_volatility_hours_utc: tuple[int, ...] = Field(default_factory=tuple)
     high_volatility_hours_size_scale: float = Field(default=1.0, ge=0.0, le=1.0)
     high_volatility_hours_entry_block: bool = False
+    volatility_regime_enabled: bool = False
+    volatility_regime_window_bars: int = Field(default=48, ge=5)
+    volatility_regime_min_observations: int = Field(default=12, ge=5)
+    volatility_regime_zscore_threshold: float = Field(default=1.5, ge=0.0)
+    high_volatility_hours_normal_regime_utc: tuple[int, ...] = Field(
+        default_factory=tuple
+    )
+    high_volatility_hours_high_regime_utc: tuple[int, ...] = Field(default_factory=tuple)
     force_close_positions_at_end: bool = True
 
 
@@ -252,6 +260,9 @@ class EventEngine:
         self.trades: list[Trade] = []
         self._trade_counter = 0
 
+        self._last_close_by_instrument: dict[InstrumentId, float] = {}
+        self._recent_abs_log_returns: dict[InstrumentId, deque[float]] = {}
+
     @property
     def history(self) -> list[dict]:
         """Backward compatible trade history."""
@@ -383,6 +394,7 @@ class EventEngine:
             short_exposure_fraction = (
                 (short_position_value / equity) if equity > 0 else 0.0
             )
+            is_high_volatility_regime = self._is_high_volatility_regime(market_data)
 
             # Agent decision
             decision = await self.supervisor.run(
@@ -394,7 +406,11 @@ class EventEngine:
 
             # Execute
             if decision:
-                self._execute(decision, market_data)
+                self._execute(
+                    decision,
+                    market_data,
+                    is_high_volatility_regime=is_high_volatility_regime,
+                )
 
                 # Re-mark same bar after execution so equity reflects fills/carry.
                 updated_position_value = sum(
@@ -508,16 +524,92 @@ class EventEngine:
         periods_per_year = int(round(seconds_per_year / median_seconds))
         return max(1, periods_per_year)
 
+    def _resolve_guardrail_hours(
+        self,
+        is_high_volatility_regime: bool,
+    ) -> tuple[int, ...]:
+        """Resolve guardrail hours from static/dynamic regime config."""
+        if not self.config.volatility_regime_enabled:
+            return self.config.high_volatility_hours_utc
+
+        if (
+            is_high_volatility_regime
+            and self.config.high_volatility_hours_high_regime_utc
+        ):
+            return self.config.high_volatility_hours_high_regime_utc
+
+        if (
+            not is_high_volatility_regime
+            and self.config.high_volatility_hours_normal_regime_utc
+        ):
+            return self.config.high_volatility_hours_normal_regime_utc
+
+        return self.config.high_volatility_hours_utc
+
+    def _is_high_volatility_regime(
+        self,
+        market_data: MarketData,
+    ) -> bool:
+        """Classify current bar as high-vol regime using rolling abs-log returns."""
+        if not self.config.volatility_regime_enabled:
+            return False
+
+        instrument_id = market_data.instrument_id
+        current_close = market_data.close
+        if current_close <= 0:
+            return False
+
+        previous_close = self._last_close_by_instrument.get(instrument_id)
+        self._last_close_by_instrument[instrument_id] = current_close
+
+        if previous_close is None or previous_close <= 0:
+            return False
+
+        abs_log_return = abs(float(np.log(current_close / previous_close)))
+        history = self._recent_abs_log_returns.setdefault(
+            instrument_id,
+            deque(maxlen=self.config.volatility_regime_window_bars),
+        )
+
+        baseline_values = list(history)
+        history.append(abs_log_return)
+
+        required_obs = max(
+            5,
+            min(
+                self.config.volatility_regime_window_bars - 1,
+                self.config.volatility_regime_min_observations,
+            ),
+        )
+        if len(baseline_values) < required_obs:
+            return False
+
+        baseline = np.asarray(baseline_values, dtype=np.float64)
+        baseline_mean = float(np.mean(baseline))
+        baseline_std = float(np.std(baseline, ddof=0))
+
+        if baseline_std <= DUST_EPS:
+            multiplier = 1.0 + self.config.volatility_regime_zscore_threshold
+            return abs_log_return >= baseline_mean * multiplier
+
+        zscore = (abs_log_return - baseline_mean) / baseline_std
+        return zscore >= self.config.volatility_regime_zscore_threshold
+
     def _apply_hour_guardrail(
         self,
         decision: TradingDecision,
         market_data: MarketData,
+        *,
+        is_high_volatility_regime: bool = False,
     ) -> TradingDecision | None:
         """Apply optional hour-of-day volatility guardrail to entry actions."""
         if decision.action not in (SignalType.LONG, SignalType.SHORT):
             return decision
 
-        if not self.config.high_volatility_hours_utc:
+        guardrail_hours_utc = self._resolve_guardrail_hours(
+            is_high_volatility_regime=is_high_volatility_regime
+        )
+        if not guardrail_hours_utc:
             return decision
 
         timestamp_utc = market_data.timestamp
@@ -527,8 +619,10 @@ class EventEngine:
             timestamp_utc = timestamp_utc.astimezone(timezone.utc)
 
         hour_utc = timestamp_utc.hour
-        if hour_utc not in self.config.high_volatility_hours_utc:
+        if hour_utc not in guardrail_hours_utc:
             return decision
+
+        regime_label = "high" if is_high_volatility_regime else "normal"
 
         if self.config.high_volatility_hours_entry_block:
             log.warning(
@@ -536,6 +630,7 @@ class EventEngine:
                 instrument=decision.instrument_id,
                 hour_utc=hour_utc,
                 action=decision.action,
+                volatility_regime=regime_label,
             )
             return None
 
@@ -557,17 +652,27 @@ class EventEngine:
                 "quantity_modifier": adjusted_modifier,
                 "rationale": (
                     f"{decision.rationale} | Backtest guardrail: "
-                    f"high-vol hour {hour_utc:02d}:00 UTC"
+                    f"high-vol hour {hour_utc:02d}:00 UTC (regime={regime_label})"
                 ),
             }
         )
 
-    def _execute(self, decision: TradingDecision, market_data: MarketData) -> None:
+    def _execute(
+        self,
+        decision: TradingDecision,
+        market_data: MarketData,
+        *,
+        is_high_volatility_regime: bool = False,
+    ) -> None:
         """Execute trade based on decision."""
         if decision.action == SignalType.NEUTRAL:
             return
 
-        decision = self._apply_hour_guardrail(decision, market_data)
+        decision = self._apply_hour_guardrail(
+            decision,
+            market_data,
+            is_high_volatility_regime=is_high_volatility_regime,
+        )
         if decision is None:
             return
 

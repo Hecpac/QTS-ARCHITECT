@@ -502,6 +502,21 @@ class _NoopBacktestSupervisor:
         return None
 
 
+class _AlwaysLongSupervisor:
+    """Supervisor stub that always emits LONG."""
+
+    def __init__(self, instrument_id: InstrumentId) -> None:
+        self.instrument_id = instrument_id
+
+    async def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return TradingDecision(
+            instrument_id=self.instrument_id,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="always long",
+        )
+
+
 class TestEventEngineExitSemantics:
     """Tests for EXIT behavior with signed positions."""
 
@@ -635,6 +650,91 @@ class TestEventEngineExitSemantics:
         trade = engine.trades[0]
         assert trade.quantity == pytest.approx(50.0)
         assert "Backtest guardrail: high-vol hour 15:00 UTC" in trade.rationale
+
+    def test_dynamic_guardrail_uses_regime_specific_hours(self) -> None:
+        """Dynamic regime mode should switch hour windows between normal/high regimes."""
+        config = BacktestConfig(
+            trade_size=10_000.0,
+            high_volatility_hours_size_scale=0.5,
+            volatility_regime_enabled=True,
+            high_volatility_hours_normal_regime_utc=(14,),
+            high_volatility_hours_high_regime_utc=(1,),
+        )
+        instrument = InstrumentId("BTC/USDT")
+
+        # High regime at 01:00 UTC -> should scale.
+        high_engine = EventEngine(supervisor=object(), config=config)
+        decision = TradingDecision(
+            instrument_id=instrument,
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="dynamic high-regime scale",
+        )
+        high_market_data = MarketData(
+            instrument_id=instrument,
+            timestamp=datetime(2026, 2, 20, 1, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=10.0,
+        )
+        high_engine._execute(
+            decision,
+            high_market_data,
+            is_high_volatility_regime=True,
+        )
+        assert len(high_engine.trades) == 1
+        assert high_engine.trades[0].quantity == pytest.approx(50.0)
+        assert "regime=high" in high_engine.trades[0].rationale
+
+        # Same hour in normal regime -> not in normal window, should keep full size.
+        normal_engine = EventEngine(supervisor=object(), config=config)
+        normal_engine._execute(
+            decision,
+            high_market_data,
+            is_high_volatility_regime=False,
+        )
+        assert len(normal_engine.trades) == 1
+        assert normal_engine.trades[0].quantity == pytest.approx(100.0)
+
+    def test_detects_high_volatility_regime_from_return_spike(self) -> None:
+        """Rolling regime detector should flip high on a large return spike."""
+        engine = EventEngine(
+            supervisor=object(),
+            config=BacktestConfig(
+                volatility_regime_enabled=True,
+                volatility_regime_window_bars=12,
+                volatility_regime_min_observations=5,
+                volatility_regime_zscore_threshold=1.0,
+            ),
+        )
+        instrument = InstrumentId("BTC/USDT")
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        closes = [100.0, 100.02, 100.03, 100.01, 100.04, 100.02, 100.03]
+        for idx, close in enumerate(closes):
+            market_data = MarketData(
+                instrument_id=instrument,
+                timestamp=start + timedelta(hours=idx),
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                volume=10.0,
+            )
+            assert engine._is_high_volatility_regime(market_data) is False  # noqa: SLF001
+
+        spike_data = MarketData(
+            instrument_id=instrument,
+            timestamp=start + timedelta(hours=len(closes)),
+            open=100.03,
+            high=105.0,
+            low=100.0,
+            close=105.0,
+            volume=10.0,
+        )
+        assert engine._is_high_volatility_regime(spike_data) is True  # noqa: SLF001
 
     def test_exit_close_short_accrues_borrow_fee(self) -> None:
         """Closing a short should charge accrued borrow/funding carry."""
