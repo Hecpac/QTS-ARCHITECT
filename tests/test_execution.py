@@ -18,7 +18,7 @@ from omegaconf import OmegaConf
 
 from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.common.types import InstrumentId, MarketData
-from qts_core.main_live import LiveTrader
+from qts_core.main_live import LiveTrader, apply_execution_guardrails
 from qts_core.execution import (
     AccountMode,
     CCXTGateway,
@@ -1217,6 +1217,98 @@ async def _run_forced_long_tick(trader: LiveTrader) -> None:
     trader.supervisor.run = _fake_supervisor_run  # type: ignore[method-assign]
 
     await trader._process_symbol_tick("BTC/USDT")
+
+
+class TestExecutionGuardrails:
+    def test_rejects_when_spread_proxy_exceeds_threshold(self) -> None:
+        decision = TradingDecision(
+            instrument_id=InstrumentId("BTC/USDT"),
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="spread check",
+        )
+        market_data = MarketData(
+            instrument_id=InstrumentId("BTC/USDT"),
+            timestamp=datetime.now(timezone.utc),
+            open=100.0,
+            high=106.0,
+            low=94.0,
+            close=100.0,
+            volume=500.0,
+        )
+
+        guarded = apply_execution_guardrails(
+            decision,
+            market_data,
+            max_estimated_slippage_bps=0.0,
+            max_estimated_spread_bps=150.0,
+            spread_volatility_factor=0.2,
+        )
+
+        assert guarded is None
+
+    def test_scales_quantity_modifier_for_participation_cap(self) -> None:
+        decision = TradingDecision(
+            instrument_id=InstrumentId("BTC/USDT"),
+            action=SignalType.LONG,
+            quantity_modifier=1.0,
+            rationale="participation check",
+        )
+        market_data = MarketData(
+            instrument_id=InstrumentId("BTC/USDT"),
+            timestamp=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=100.0,
+        )
+
+        guarded = apply_execution_guardrails(
+            decision,
+            market_data,
+            max_intrabar_volatility=1.0,
+            max_estimated_slippage_bps=0.0,
+            max_estimated_spread_bps=0.0,
+            max_participation_rate=0.10,
+            projected_quantity=25.0,
+        )
+
+        assert guarded is not None
+        assert guarded.quantity_modifier == pytest.approx(0.4)
+        assert "participation cap" in guarded.rationale
+
+    def test_dynamic_risk_scaling_reduces_size_in_high_volatility(self) -> None:
+        decision = TradingDecision(
+            instrument_id=InstrumentId("BTC/USDT"),
+            action=SignalType.LONG,
+            quantity_modifier=0.8,
+            rationale="dynamic scaling check",
+        )
+        market_data = MarketData(
+            instrument_id=InstrumentId("BTC/USDT"),
+            timestamp=datetime.now(timezone.utc),
+            open=100.0,
+            high=120.0,
+            low=80.0,
+            close=100.0,
+            volume=1_000.0,
+        )
+
+        guarded = apply_execution_guardrails(
+            decision,
+            market_data,
+            max_intrabar_volatility=0.10,
+            high_volatility_size_scale=1.0,
+            max_estimated_slippage_bps=0.0,
+            max_estimated_spread_bps=0.0,
+            enable_dynamic_volatility_risk_scaling=True,
+            min_dynamic_risk_scale=0.2,
+        )
+
+        assert guarded is not None
+        assert guarded.quantity_modifier == pytest.approx(0.2)
+        assert "dynamic risk scale" in guarded.rationale
 
 
 class TestCCXTGatewayPayload:

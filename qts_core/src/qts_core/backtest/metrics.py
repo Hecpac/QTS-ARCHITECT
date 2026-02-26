@@ -531,8 +531,8 @@ class MetricsCalculator:
     def _tail_risk_95(self) -> tuple[float, float]:
         """Compute (VaR_95, CVaR_95) from the empirical worst 5% tail.
 
-        Uses ``np.partition`` to select the left-tail bucket in linear time,
-        avoiding full sort/percentile overhead.
+        Uses one ``partition`` pass and reuses the same tail sample for both
+        metrics, avoiding full sort/percentile overhead.
         """
         if self._tail_risk_95_cache is not None:
             return self._tail_risk_95_cache
@@ -542,16 +542,16 @@ class MetricsCalculator:
             self._tail_risk_95_cache = (0.0, 0.0)
             return self._tail_risk_95_cache
 
-        alpha = 0.05
-        tail_count = max(1, int(np.ceil(n * alpha)))
+        tail_count = max(1, int(np.ceil(n * 0.05)))
         kth = tail_count - 1
 
-        # Partition copy: first ``tail_count`` elements are the worst returns
-        # (unordered), enough for empirical VaR/CVaR computation.
-        partitioned = np.partition(self.returns, kth)
-        tail = partitioned[:tail_count]
+        # In-place partition on a copy: first ``tail_count`` values are the
+        # worst tail bucket (unordered), while index ``kth`` is VaR cutoff.
+        working = self.returns.copy()
+        working.partition(kth)
+        tail = working[:tail_count]
 
-        var_95 = float(np.max(tail))
+        var_95 = float(working[kth])
         cvar_95 = float(np.mean(tail))
 
         self._tail_risk_95_cache = (var_95, cvar_95)

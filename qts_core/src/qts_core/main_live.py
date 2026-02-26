@@ -42,6 +42,12 @@ def apply_execution_guardrails(
     high_volatility_size_scale: float = 0.5,
     max_estimated_slippage_bps: float = 50.0,
     slippage_volatility_factor: float = 0.25,
+    max_estimated_spread_bps: float = 0.0,
+    spread_volatility_factor: float = 0.15,
+    max_participation_rate: float = 0.0,
+    projected_quantity: float | None = None,
+    enable_dynamic_volatility_risk_scaling: bool = True,
+    min_dynamic_risk_scale: float = 0.25,
     high_volatility_hours_utc: tuple[int, ...] = (),
     high_volatility_hours_size_scale: float = 1.0,
     high_volatility_hours_entry_block: bool = False,
@@ -74,12 +80,29 @@ def apply_execution_guardrails(
 
     intrabar_volatility = max(0.0, (market_data.high - market_data.low) / market_data.close)
     estimated_slippage_bps = intrabar_volatility * slippage_volatility_factor * 10_000
+    estimated_spread_bps = intrabar_volatility * spread_volatility_factor * 10_000
 
     if max_estimated_slippage_bps > 0 and estimated_slippage_bps > max_estimated_slippage_bps:
         return None
 
+    if max_estimated_spread_bps > 0 and estimated_spread_bps > max_estimated_spread_bps:
+        return None
+
     adjusted_modifier = decision.quantity_modifier
     rationale_suffix: list[str] = []
+
+    if (
+        enable_dynamic_volatility_risk_scaling
+        and max_intrabar_volatility > 0
+        and intrabar_volatility > max_intrabar_volatility
+    ):
+        dynamic_scale = max_intrabar_volatility / intrabar_volatility
+        dynamic_scale = max(min_dynamic_risk_scale, min(1.0, dynamic_scale))
+        if dynamic_scale < 1.0:
+            adjusted_modifier *= dynamic_scale
+            rationale_suffix.append(
+                f"Guardrail: dynamic risk scale {dynamic_scale:.2f}"
+            )
 
     if (
         max_intrabar_volatility > 0
@@ -97,6 +120,27 @@ def apply_execution_guardrails(
             f"Guardrail: high-vol hour {hour_utc:02d}:00 UTC"
         )
 
+    if max_participation_rate > 0:
+        if market_data.volume <= 0:
+            return None
+
+        if projected_quantity is not None and projected_quantity > 0:
+            if decision.quantity_modifier > 0:
+                quantity_scale = adjusted_modifier / decision.quantity_modifier
+            else:
+                quantity_scale = 0.0
+
+            projected_effective_qty = projected_quantity * max(0.0, quantity_scale)
+            projected_participation = projected_effective_qty / market_data.volume
+
+            if projected_participation > max_participation_rate:
+                participation_scale = max_participation_rate / projected_participation
+                adjusted_modifier *= max(0.0, participation_scale)
+                rationale_suffix.append(
+                    "Guardrail: participation cap "
+                    f"{projected_participation:.2%}>{max_participation_rate:.2%}"
+                )
+
     adjusted_modifier = max(0.0, min(1.0, adjusted_modifier))
     if adjusted_modifier < 1e-8:
         return None
@@ -106,7 +150,8 @@ def apply_execution_guardrails(
 
     rationale = decision.rationale
     if rationale_suffix:
-        rationale = f"{rationale} | {'; '.join(rationale_suffix)}"
+        rationale_detail = "; ".join(rationale_suffix)
+        rationale = f"{rationale} | {rationale_detail}" if rationale else rationale_detail
 
     return decision.model_copy(
         update={
@@ -210,6 +255,29 @@ class LiveTrader:
         self.guardrails_slippage_volatility_factor: float = float(
             guardrails_cfg.get("slippage_volatility_factor", 0.25)
             if guardrails_cfg else 0.25
+        )
+        self.guardrails_max_estimated_spread_bps: float = float(
+            guardrails_cfg.get("max_estimated_spread_bps", 0.0)
+            if guardrails_cfg else 0.0
+        )
+        self.guardrails_spread_volatility_factor: float = float(
+            guardrails_cfg.get("spread_volatility_factor", 0.15)
+            if guardrails_cfg else 0.15
+        )
+        self.guardrails_max_participation_rate: float = max(
+            0.0,
+            float(guardrails_cfg.get("max_participation_rate", 0.0) if guardrails_cfg else 0.0),
+        )
+        self.guardrails_enable_dynamic_volatility_risk_scaling: bool = bool(
+            guardrails_cfg.get("enable_dynamic_volatility_risk_scaling", True)
+            if guardrails_cfg else True
+        )
+        self.guardrails_min_dynamic_risk_scale: float = max(
+            0.0,
+            min(
+                1.0,
+                float(guardrails_cfg.get("min_dynamic_risk_scale", 0.25) if guardrails_cfg else 0.25),
+            ),
         )
         raw_high_vol_hours = (
             guardrails_cfg.get("high_volatility_hours_utc", []) if guardrails_cfg else []
@@ -1185,6 +1253,10 @@ class LiveTrader:
         if decision.action == SignalType.EXIT:
             guarded_decision = decision
         else:
+            projected_quantity = self.oms.calculate_order_quantity(
+                market_data.close,
+                decision.quantity_modifier,
+            )
             guarded_decision = apply_execution_guardrails(
                 decision,
                 market_data,
@@ -1194,6 +1266,14 @@ class LiveTrader:
                 high_volatility_size_scale=self.guardrails_high_volatility_size_scale,
                 max_estimated_slippage_bps=self.guardrails_max_estimated_slippage_bps,
                 slippage_volatility_factor=self.guardrails_slippage_volatility_factor,
+                max_estimated_spread_bps=self.guardrails_max_estimated_spread_bps,
+                spread_volatility_factor=self.guardrails_spread_volatility_factor,
+                max_participation_rate=self.guardrails_max_participation_rate,
+                projected_quantity=projected_quantity,
+                enable_dynamic_volatility_risk_scaling=(
+                    self.guardrails_enable_dynamic_volatility_risk_scaling
+                ),
+                min_dynamic_risk_scale=self.guardrails_min_dynamic_risk_scale,
                 high_volatility_hours_utc=self.guardrails_high_volatility_hours_utc,
                 high_volatility_hours_size_scale=self.guardrails_high_volatility_hours_size_scale,
                 high_volatility_hours_entry_block=self.guardrails_high_volatility_hours_entry_block,

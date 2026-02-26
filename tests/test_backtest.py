@@ -183,6 +183,37 @@ class TestMetricsCalculator:
         # CVaR should be at least as bad as VaR
         assert cvar <= calc.var_95()
 
+    def test_var_cvar_95_with_multi_element_tail_bucket(self) -> None:
+        """Tail bucket should support n where worst 5% has multiple elements."""
+        returns = np.linspace(-0.20, 0.20, 40)
+        calc = MetricsCalculator(returns)
+
+        var = calc.var_95()
+        cvar = calc.cvar_95()
+
+        tail_count = max(1, int(np.ceil(len(returns) * 0.05)))
+        expected_tail = np.partition(returns, tail_count - 1)[:tail_count]
+
+        assert tail_count == 2
+        assert var == pytest.approx(float(np.max(expected_tail)))
+        assert cvar == pytest.approx(float(np.mean(expected_tail)))
+        assert cvar <= var
+
+    def test_tail_risk_cache_shared_between_var_and_cvar(self) -> None:
+        returns = np.array([-0.12, -0.08, -0.02, 0.01, 0.03, 0.04, -0.01, 0.02])
+        calc = MetricsCalculator(returns)
+
+        assert calc._tail_risk_95_cache is None  # noqa: SLF001
+        var = calc.var_95()
+
+        cached = calc._tail_risk_95_cache  # noqa: SLF001
+        assert cached is not None
+        assert var == pytest.approx(cached[0])
+
+        cvar = calc.cvar_95()
+        assert calc._tail_risk_95_cache is cached  # noqa: SLF001
+        assert cvar == pytest.approx(cached[1])
+
     def test_skewness(self) -> None:
         """Test skewness calculation."""
         # Right-skewed distribution
