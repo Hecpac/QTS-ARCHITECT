@@ -1,0 +1,524 @@
+{
+  "generated_at_utc": "2026-02-27T00:29:04.627987Z",
+  "source": "reports/qts-oanda-minute-forensics-longonly-plusfvg-2026-02-26.json",
+  "method": "trade-level proxy walk-forward from realized closed roundtrips (90d/15m control).",
+  "limitations": [
+    "Proxy does not replay bar-level path; it adjusts realized trades only.",
+    "Drawdown is trade-realized DD, not full mark-to-market bar DD.",
+    "Rolling refit uses available 90d data (45d train / 14d test), not 150d 60/30 due data availability in artifacts."
+  ],
+  "static_policy_C": {
+    "hard_minutes": [
+      "08:45"
+    ],
+    "hard_pattern": [
+      "session low breakout reversal|09:45"
+    ],
+    "soft_pattern": [
+      "session low breakout reversal|08:15",
+      "session low breakout reversal|08:30"
+    ],
+    "soft_multiplier": 0.5
+  },
+  "static_walkforward_3x30": {
+    "blocks": [
+      {
+        "label": "B1",
+        "start_utc": "2025-11-28T14:00:00+00:00",
+        "end_utc": "2025-12-28T14:00:00+00:00",
+        "input_trades": 13,
+        "A": {
+          "trades": 13,
+          "realized_pnl": 181.39125719133375,
+          "final_capital": 100181.39125719134,
+          "total_return": 0.0018139125719134341,
+          "profit_factor": 1.58166381126373,
+          "win_rate": 0.6923076923076923,
+          "max_drawdown_trade_realized": -0.002043683080956149,
+          "worst_trade": -104.43967361481627,
+          "top3_share_gross_profit": 0.7798000255476654,
+          "gross_profit": 493.24022162534374,
+          "gross_loss": 311.84896443401004
+        },
+        "C": {
+          "trades": 11,
+          "realized_pnl": 202.72975467308288,
+          "final_capital": 100202.72975467308,
+          "total_return": 0.0020272975467308108,
+          "profit_factor": 1.7752878591834245,
+          "win_rate": 0.6363636363636364,
+          "max_drawdown_trade_realized": -0.0015424750408830068,
+          "worst_trade": -104.43967361481627,
+          "top3_share_gross_profit": 0.8285494522003364,
+          "gross_profit": 464.21940947898804,
+          "gross_loss": 261.48965480590516
+        },
+        "C_counts": {
+          "blocked_by_hard_minute": 1,
+          "blocked_by_hard_pattern_minute": 1,
+          "size_scaled_by_soft_risk": 3,
+          "input_count": 13,
+          "rejected_by_margin_or_limits": 0,
+          "output_count": 11
+        },
+        "delta": {
+          "pnl": 21.33849748174913,
+          "profit_factor": 0.19362404791969445,
+          "max_drawdown_trade_realized": 0.0005012080400731422,
+          "worst_trade": 0.0
+        },
+        "flags": {
+          "pf_gt_1": true,
+          "dd_not_worse": true,
+          "worst_trade_improves": true,
+          "top3_concentration_alert": true
+        }
+      },
+      {
+        "label": "B2",
+        "start_utc": "2025-12-28T14:00:00+00:00",
+        "end_utc": "2026-01-27T14:00:00+00:00",
+        "input_trades": 17,
+        "A": {
+          "trades": 17,
+          "realized_pnl": 964.0656692209529,
+          "final_capital": 100964.06566922096,
+          "total_return": 0.009640656692209593,
+          "profit_factor": 16.582688229386857,
+          "win_rate": 0.9411764705882353,
+          "max_drawdown_trade_realized": -0.0006183579893118685,
+          "worst_trade": -61.86773777600547,
+          "top3_share_gross_profit": 0.5688040838082208,
+          "gross_profit": 1025.9334069969584,
+          "gross_loss": 61.86773777600547
+        },
+        "C": {
+          "trades": 17,
+          "realized_pnl": 907.3499871544091,
+          "final_capital": 100907.3499871544,
+          "total_return": 0.009073499871544044,
+          "profit_factor": 15.665963550170602,
+          "win_rate": 0.9411764705882353,
+          "max_drawdown_trade_realized": -0.0006184093972848581,
+          "worst_trade": -61.86773777600547,
+          "top3_share_gross_profit": 0.6020887738686868,
+          "gross_profit": 969.2177249304145,
+          "gross_loss": 61.86773777600547
+        },
+        "C_counts": {
+          "blocked_by_hard_minute": 0,
+          "blocked_by_hard_pattern_minute": 0,
+          "size_scaled_by_soft_risk": 5,
+          "input_count": 17,
+          "rejected_by_margin_or_limits": 0,
+          "output_count": 17
+        },
+        "delta": {
+          "pnl": -56.71568206654388,
+          "profit_factor": -0.9167246792162551,
+          "max_drawdown_trade_realized": -5.140797298963662e-08,
+          "worst_trade": 0.0
+        },
+        "flags": {
+          "pf_gt_1": true,
+          "dd_not_worse": false,
+          "worst_trade_improves": true,
+          "top3_concentration_alert": false
+        }
+      },
+      {
+        "label": "B3",
+        "start_utc": "2026-01-27T14:00:00+00:00",
+        "end_utc": "2026-02-26T14:00:01+00:00",
+        "input_trades": 37,
+        "A": {
+          "trades": 37,
+          "realized_pnl": -819.6503546853784,
+          "final_capital": 99180.34964531462,
+          "total_return": -0.00819650354685375,
+          "profit_factor": 0.5396772833459698,
+          "win_rate": 0.7027027027027027,
+          "max_drawdown_trade_realized": -0.014375873674894235,
+          "worst_trade": -550.5226720563076,
+          "top3_share_gross_profit": 0.2537354330464171,
+          "gross_profit": 960.9490488009628,
+          "gross_loss": 1780.599403486341
+        },
+        "C": {
+          "trades": 32,
+          "realized_pnl": 378.9018447959187,
+          "final_capital": 100378.90184479592,
+          "total_return": 0.0037890184479592026,
+          "profit_factor": 1.8585271535731285,
+          "win_rate": 0.8125,
+          "max_drawdown_trade_realized": -0.003006243589722901,
+          "worst_trade": -175.64314836525688,
+          "top3_share_gross_profit": 0.29726233524994067,
+          "gross_profit": 820.2412284356283,
+          "gross_loss": 441.3393836397095
+        },
+        "C_counts": {
+          "blocked_by_hard_minute": 4,
+          "blocked_by_hard_pattern_minute": 1,
+          "size_scaled_by_soft_risk": 12,
+          "input_count": 37,
+          "rejected_by_margin_or_limits": 0,
+          "output_count": 32
+        },
+        "delta": {
+          "pnl": 1198.552199481297,
+          "profit_factor": 1.3188498702271587,
+          "max_drawdown_trade_realized": 0.011369630085171334,
+          "worst_trade": 374.8795236910507
+        },
+        "flags": {
+          "pf_gt_1": true,
+          "dd_not_worse": true,
+          "worst_trade_improves": true,
+          "top3_concentration_alert": false
+        }
+      }
+    ],
+    "aggregate": {
+      "A": {
+        "trades": 67,
+        "realized_pnl": 325.80657172690826,
+        "final_capital": 100325.8065717269,
+        "total_return": 0.003258065717269165,
+        "profit_factor": 1.1512343387608825,
+        "win_rate": 0.7611940298507462,
+        "max_drawdown_trade_realized": -0.014213215457609452,
+        "worst_trade": -550.5226720563076,
+        "top3_share_gross_profit": 0.23794519364620806,
+        "gross_profit": 2480.122677423265,
+        "gross_loss": 2154.3161056963568
+      },
+      "C": {
+        "trades": 60,
+        "realized_pnl": 1488.9815866234107,
+        "final_capital": 101488.98158662341,
+        "total_return": 0.014889815866234057,
+        "profit_factor": 2.947152953855114,
+        "win_rate": 0.8166666666666667,
+        "max_drawdown_trade_realized": -0.002973274261079517,
+        "worst_trade": -175.64314836525688,
+        "top3_share_gross_profit": 0.26185336846418933,
+        "gross_profit": 2253.6783628450307,
+        "gross_loss": 764.6967762216201
+      },
+      "C_counts": {
+        "blocked_by_hard_minute": 5,
+        "blocked_by_hard_pattern_minute": 2,
+        "size_scaled_by_soft_risk": 20,
+        "input_count": 67,
+        "rejected_by_margin_or_limits": 0,
+        "output_count": 60
+      },
+      "delta": {
+        "pnl": 1163.1750148965025,
+        "profit_factor": 1.7959186150942315,
+        "max_drawdown_trade_realized": 0.011239941196529935,
+        "worst_trade": 374.8795236910507
+      },
+      "invariants": {
+        "no_entry_08_45": true,
+        "no_reversal_09_45": true
+      }
+    },
+    "gate": {
+      "pf_gt_1_blocks": "3/3",
+      "dd_not_worse_blocks": "2/3",
+      "worst_trade_improves_blocks": "3/3",
+      "combined_pf_gt_1": true,
+      "combined_dd_not_worse": true,
+      "pass": true
+    }
+  },
+  "sensitivity_tests": {
+    "hard_minute_plus_minus_5": [
+      {
+        "hard_minute": "08:40",
+        "trades": 65,
+        "realized_pnl": 1058.5262721279944,
+        "final_capital": 101058.526272128,
+        "total_return": 0.010585262721279909,
+        "profit_factor": 1.8811886413403418,
+        "win_rate": 0.7692307692307693,
+        "max_drawdown_trade_realized": -0.006165308734768948,
+        "worst_trade": -323.09731596126574,
+        "top3_share_gross_profit": 0.26114697602689546,
+        "gross_profit": 2259.774475370732,
+        "gross_loss": 1201.2482032427374
+      },
+      {
+        "hard_minute": "08:45",
+        "trades": 60,
+        "realized_pnl": 1488.9815866234107,
+        "final_capital": 101488.98158662341,
+        "total_return": 0.014889815866234057,
+        "profit_factor": 2.947152953855114,
+        "win_rate": 0.8166666666666667,
+        "max_drawdown_trade_realized": -0.002973274261079517,
+        "worst_trade": -175.64314836525688,
+        "top3_share_gross_profit": 0.26185336846418933,
+        "gross_profit": 2253.6783628450307,
+        "gross_loss": 764.6967762216201
+      },
+      {
+        "hard_minute": "08:50",
+        "trades": 65,
+        "realized_pnl": 1058.5262721279944,
+        "final_capital": 101058.526272128,
+        "total_return": 0.010585262721279909,
+        "profit_factor": 1.8811886413403418,
+        "win_rate": 0.7692307692307693,
+        "max_drawdown_trade_realized": -0.006165308734768948,
+        "worst_trade": -323.09731596126574,
+        "top3_share_gross_profit": 0.26114697602689546,
+        "gross_profit": 2259.774475370732,
+        "gross_loss": 1201.2482032427374
+      }
+    ],
+    "soft_multiplier_sweep": [
+      {
+        "soft_multiplier": 0.4,
+        "trades": 60,
+        "realized_pnl": 1527.063196335659,
+        "final_capital": 101527.06319633566,
+        "total_return": 0.015270631963356651,
+        "profit_factor": 3.231935957136168,
+        "win_rate": 0.8166666666666667,
+        "max_drawdown_trade_realized": -0.0023788297477114195,
+        "worst_trade": -140.5145186922055,
+        "top3_share_gross_profit": 0.2668775685651481,
+        "gross_profit": 2211.250926477817,
+        "gross_loss": 684.1877301421578
+      },
+      {
+        "soft_multiplier": 0.5,
+        "trades": 60,
+        "realized_pnl": 1488.9815866234107,
+        "final_capital": 101488.98158662341,
+        "total_return": 0.014889815866234057,
+        "profit_factor": 2.947152953855114,
+        "win_rate": 0.8166666666666667,
+        "max_drawdown_trade_realized": -0.002973274261079517,
+        "worst_trade": -175.64314836525688,
+        "top3_share_gross_profit": 0.26185336846418933,
+        "gross_profit": 2253.6783628450307,
+        "gross_loss": 764.6967762216201
+      },
+      {
+        "soft_multiplier": 0.6,
+        "trades": 60,
+        "realized_pnl": 1450.8999769111622,
+        "final_capital": 101450.89997691117,
+        "total_return": 0.014508999769111686,
+        "profit_factor": 2.716623263385799,
+        "win_rate": 0.8166666666666667,
+        "max_drawdown_trade_realized": -0.0035676136608138176,
+        "worst_trade": -210.77177803830824,
+        "top3_share_gross_profit": 0.25701484267331914,
+        "gross_profit": 2296.1057992122446,
+        "gross_loss": 845.2058223010824
+      }
+    ]
+  },
+  "rolling_refit_proxy": {
+    "config": {
+      "train_days": 45,
+      "test_days": 14,
+      "step_days": 14,
+      "folds_target": 3
+    },
+    "folds": [
+      {
+        "fold": 1,
+        "train_start_utc": "2025-12-01T14:00:00+00:00",
+        "train_end_utc": "2026-01-15T14:00:00+00:00",
+        "test_start_utc": "2026-01-15T14:00:00+00:00",
+        "test_end_utc": "2026-01-29T14:00:00+00:00",
+        "train_trades": 21,
+        "test_trades": 14,
+        "policy": {
+          "hard_minutes": [
+            "09:30"
+          ],
+          "hard_pattern": [
+            "session low breakout reversal|08:15"
+          ],
+          "soft_pattern": [
+            "session low breakout reversal|09:00"
+          ],
+          "soft_mult": 0.5
+        },
+        "A": {
+          "trades": 14,
+          "realized_pnl": 752.1695342715633,
+          "final_capital": 100752.16953427157,
+          "total_return": 0.00752169534271574,
+          "profit_factor": 118.6471837427451,
+          "win_rate": 0.8571428571428571,
+          "max_drawdown_trade_realized": -6.348285071688942e-05,
+          "worst_trade": -4.507539199333994,
+          "top3_share_gross_profit": 0.710747934581472,
+          "gross_profit": 758.5629685242378,
+          "gross_loss": 6.3934342526745525
+        },
+        "Refit": {
+          "trades": 11,
+          "realized_pnl": 682.0425870611775,
+          "final_capital": 100682.04258706118,
+          "total_return": 0.006820425870611713,
+          "profit_factor": 107.67859558825681,
+          "win_rate": 0.8181818181818182,
+          "max_drawdown_trade_realized": -6.350958803236217e-05,
+          "worst_trade": -4.507539199333994,
+          "top3_share_gross_profit": 0.7831476657767733,
+          "gross_profit": 688.436021313852,
+          "gross_loss": 6.3934342526745525
+        },
+        "Refit_counts": {
+          "blocked_by_hard_minute": 0,
+          "blocked_by_hard_pattern_minute": 3,
+          "size_scaled_by_soft_risk": 1,
+          "input_count": 14,
+          "rejected_by_margin_or_limits": 0,
+          "output_count": 11
+        },
+        "flags": {
+          "pf_gt_1": true,
+          "dd_not_worse": false,
+          "worst_trade_improves": true
+        }
+      },
+      {
+        "fold": 2,
+        "train_start_utc": "2025-12-15T14:00:00+00:00",
+        "train_end_utc": "2026-01-29T14:00:00+00:00",
+        "test_start_utc": "2026-01-29T14:00:00+00:00",
+        "test_end_utc": "2026-02-12T14:00:00+00:00",
+        "train_trades": 28,
+        "test_trades": 14,
+        "policy": {
+          "hard_minutes": [
+            "09:30"
+          ],
+          "hard_pattern": [
+            "session low breakout reversal|08:15"
+          ],
+          "soft_pattern": [
+            "bearish fvg|08:45"
+          ],
+          "soft_mult": 0.5
+        },
+        "A": {
+          "trades": 14,
+          "realized_pnl": -916.0343248937927,
+          "final_capital": 99083.96567510621,
+          "total_return": -0.009160343248937886,
+          "profit_factor": 0.37918380981134564,
+          "win_rate": 0.7142857142857143,
+          "max_drawdown_trade_realized": -0.014388957899643007,
+          "worst_trade": -550.5226720563076,
+          "top3_share_gross_profit": 0.4357957404283111,
+          "gross_profit": 559.4979491846701,
+          "gross_loss": 1475.5322740784627
+        },
+        "Refit": {
+          "trades": 11,
+          "realized_pnl": -794.2738382801596,
+          "final_capital": 99205.72616171984,
+          "total_return": -0.007942738382801573,
+          "profit_factor": 0.35156358639835944,
+          "win_rate": 0.7272727272727273,
+          "max_drawdown_trade_realized": -0.011882698006339232,
+          "worst_trade": -550.5226720563076,
+          "top3_share_gross_profit": 0.5142799294402151,
+          "gross_profit": 430.63244646792754,
+          "gross_loss": 1224.906284748087
+        },
+        "Refit_counts": {
+          "blocked_by_hard_minute": 1,
+          "blocked_by_hard_pattern_minute": 2,
+          "size_scaled_by_soft_risk": 0,
+          "input_count": 14,
+          "rejected_by_margin_or_limits": 0,
+          "output_count": 11
+        },
+        "flags": {
+          "pf_gt_1": false,
+          "dd_not_worse": true,
+          "worst_trade_improves": true
+        }
+      },
+      {
+        "fold": 3,
+        "train_start_utc": "2025-12-29T14:00:00+00:00",
+        "train_end_utc": "2026-02-12T14:00:00+00:00",
+        "test_start_utc": "2026-02-12T14:00:00+00:00",
+        "test_end_utc": "2026-02-26T14:00:00+00:00",
+        "train_trades": 36,
+        "test_trades": 17,
+        "policy": {
+          "hard_minutes": [
+            "08:45"
+          ],
+          "hard_pattern": [
+            "session low breakout reversal|08:30"
+          ],
+          "soft_pattern": [
+            "bearish fvg|08:45",
+            "session low breakout reversal|08:15"
+          ],
+          "soft_mult": 0.5
+        },
+        "A": {
+          "trades": 17,
+          "realized_pnl": -18.889391687014367,
+          "final_capital": 99981.11060831299,
+          "total_return": -0.00018889391687015866,
+          "profit_factor": 0.9367557572246241,
+          "win_rate": 0.7058823529411765,
+          "max_drawdown_trade_realized": -0.002094420648172224,
+          "worst_trade": -107.0606768071769,
+          "top3_share_gross_profit": 0.5066820074414011,
+          "gross_profit": 279.78430346818953,
+          "gross_loss": 298.67369515520386
+        },
+        "Refit": {
+          "trades": 13,
+          "realized_pnl": 42.73533174660594,
+          "final_capital": 100042.7353317466,
+          "total_return": 0.00042735331746612815,
+          "profit_factor": 1.3044190429080718,
+          "win_rate": 0.6923076923076923,
+          "max_drawdown_trade_realized": -0.0005333423572648766,
+          "worst_trade": -53.364211159664386,
+          "top3_share_gross_profit": 0.6147765127703619,
+          "gross_profit": 183.11857235587075,
+          "gross_loss": 140.38324060926482
+        },
+        "Refit_counts": {
+          "blocked_by_hard_minute": 1,
+          "blocked_by_hard_pattern_minute": 3,
+          "size_scaled_by_soft_risk": 3,
+          "input_count": 17,
+          "rejected_by_margin_or_limits": 0,
+          "output_count": 13
+        },
+        "flags": {
+          "pf_gt_1": true,
+          "dd_not_worse": true,
+          "worst_trade_improves": true
+        }
+      }
+    ],
+    "summary": {
+      "folds": 3,
+      "pf_gt_1_folds": "2/3",
+      "dd_not_worse_folds": "2/3",
+      "worst_trade_improves_folds": "3/3"
+    }
+  }
+}
