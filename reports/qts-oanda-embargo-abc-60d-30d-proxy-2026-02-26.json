@@ -1,0 +1,195 @@
+{
+  "generated_at_utc": "2026-02-27T00:52:52.433754+00:00",
+  "instrument": "XAU_USD",
+  "source_report": "reports/qts-oanda-minute-forensics-longonly-plusfvg-2026-02-26.json",
+  "method": "proxy from realized closed roundtrips; no full bar-by-bar re-simulation",
+  "cases": {
+    "A_control": {
+      "hard_block_minutes_ny": [],
+      "hard_block_pattern_minutes_ny": [],
+      "soft_risk_pattern_minutes_ny": [],
+      "soft_risk_multiplier": 1.0
+    },
+    "B_hard_embargo": {
+      "hard_block_minutes_ny": [
+        "08:45"
+      ],
+      "hard_block_pattern_minutes_ny": [
+        "session low breakout reversal|09:45"
+      ],
+      "soft_risk_pattern_minutes_ny": [],
+      "soft_risk_multiplier": 1.0
+    },
+    "C_hard_plus_soft": {
+      "hard_block_minutes_ny": [
+        "08:45"
+      ],
+      "hard_block_pattern_minutes_ny": [
+        "session low breakout reversal|09:45"
+      ],
+      "soft_risk_pattern_minutes_ny": [
+        "session low breakout reversal|08:15",
+        "session low breakout reversal|08:30"
+      ],
+      "soft_risk_multiplier": 0.5
+    }
+  },
+  "results": [
+    {
+      "case": "A_control",
+      "window": "60d_15m_proxy",
+      "window_start_utc": "2025-12-28T14:00:00+00:00",
+      "window_end_utc": "2026-02-26T14:00:00+00:00",
+      "input_closed_roundtrips": 54,
+      "closed_roundtrips": 54,
+      "wins": 42,
+      "losses": 12,
+      "win_rate": 0.7777777777777778,
+      "profit_factor": 1.078381487138289,
+      "realized_pnl": 144.4153145355745,
+      "final_capital": 100144.41531453558,
+      "total_return": 0.001444153145355731,
+      "annualized_return": 0.008817575230469998,
+      "max_drawdown": -0.014238727811856089,
+      "worst_trade": -550.5226720563076,
+      "policy_counts": {
+        "input": 54,
+        "blocked_by_hard_minute": 0,
+        "blocked_by_hard_pattern_minute": 0,
+        "size_scaled_by_soft_risk": 0,
+        "rejected_by_margin_or_limits": 0,
+        "output": 54
+      }
+    },
+    {
+      "case": "B_hard_embargo",
+      "window": "60d_15m_proxy",
+      "window_start_utc": "2025-12-28T14:00:00+00:00",
+      "window_end_utc": "2026-02-26T14:00:00+00:00",
+      "input_closed_roundtrips": 54,
+      "closed_roundtrips": 49,
+      "wins": 42,
+      "losses": 7,
+      "win_rate": 0.8571428571428571,
+      "profit_factor": 2.3227713551689027,
+      "realized_pnl": 1131.4894136129992,
+      "final_capital": 101131.489413613,
+      "total_return": 0.011314894136130071,
+      "annualized_return": 0.07084255209583845,
+      "max_drawdown": -0.005953744156014462,
+      "worst_trade": -351.28629673051375,
+      "policy_counts": {
+        "input": 54,
+        "blocked_by_hard_minute": 4,
+        "blocked_by_hard_pattern_minute": 1,
+        "size_scaled_by_soft_risk": 0,
+        "rejected_by_margin_or_limits": 0,
+        "output": 49
+      }
+    },
+    {
+      "case": "C_hard_plus_soft",
+      "window": "60d_15m_proxy",
+      "window_start_utc": "2025-12-28T14:00:00+00:00",
+      "window_end_utc": "2026-02-26T14:00:00+00:00",
+      "input_closed_roundtrips": 54,
+      "closed_roundtrips": 49,
+      "wins": 42,
+      "losses": 7,
+      "win_rate": 0.8571428571428571,
+      "profit_factor": 3.5561081654242237,
+      "realized_pnl": 1286.2518319503279,
+      "final_capital": 101286.25183195033,
+      "total_return": 0.012862518319503247,
+      "annualized_return": 0.0808502865808094,
+      "max_drawdown": -0.0029792412457972928,
+      "worst_trade": -175.64314836525688,
+      "policy_counts": {
+        "input": 54,
+        "blocked_by_hard_minute": 4,
+        "blocked_by_hard_pattern_minute": 1,
+        "size_scaled_by_soft_risk": 17,
+        "rejected_by_margin_or_limits": 0,
+        "output": 49
+      }
+    },
+    {
+      "case": "A_control",
+      "window": "30d_15m_proxy",
+      "window_start_utc": "2026-01-27T14:00:00+00:00",
+      "window_end_utc": "2026-02-26T14:00:00+00:00",
+      "input_closed_roundtrips": 37,
+      "closed_roundtrips": 37,
+      "wins": 26,
+      "losses": 11,
+      "win_rate": 0.7027027027027027,
+      "profit_factor": 0.5396772833459698,
+      "realized_pnl": -819.6503546853784,
+      "final_capital": 99180.34964531462,
+      "total_return": -0.00819650354685375,
+      "annualized_return": -0.0952847884074608,
+      "max_drawdown": -0.014375873674894235,
+      "worst_trade": -550.5226720563076,
+      "policy_counts": {
+        "input": 37,
+        "blocked_by_hard_minute": 0,
+        "blocked_by_hard_pattern_minute": 0,
+        "size_scaled_by_soft_risk": 0,
+        "rejected_by_margin_or_limits": 0,
+        "output": 37
+      }
+    },
+    {
+      "case": "B_hard_embargo",
+      "window": "30d_15m_proxy",
+      "window_start_utc": "2026-01-27T14:00:00+00:00",
+      "window_end_utc": "2026-02-26T14:00:00+00:00",
+      "input_closed_roundtrips": 37,
+      "closed_roundtrips": 32,
+      "wins": 26,
+      "losses": 6,
+      "win_rate": 0.8125,
+      "profit_factor": 1.2109872784923443,
+      "realized_pnl": 167.42374439204636,
+      "final_capital": 100167.42374439204,
+      "total_return": 0.0016742374439204788,
+      "annualized_return": 0.02056138760193149,
+      "max_drawdown": -0.006011065323251019,
+      "worst_trade": -351.28629673051375,
+      "policy_counts": {
+        "input": 37,
+        "blocked_by_hard_minute": 4,
+        "blocked_by_hard_pattern_minute": 1,
+        "size_scaled_by_soft_risk": 0,
+        "rejected_by_margin_or_limits": 0,
+        "output": 32
+      }
+    },
+    {
+      "case": "C_hard_plus_soft",
+      "window": "30d_15m_proxy",
+      "window_start_utc": "2026-01-27T14:00:00+00:00",
+      "window_end_utc": "2026-02-26T14:00:00+00:00",
+      "input_closed_roundtrips": 37,
+      "closed_roundtrips": 32,
+      "wins": 26,
+      "losses": 6,
+      "win_rate": 0.8125,
+      "profit_factor": 1.8585271535731285,
+      "realized_pnl": 378.9018447959187,
+      "final_capital": 100378.90184479592,
+      "total_return": 0.0037890184479592026,
+      "annualized_return": 0.047087612642962906,
+      "max_drawdown": -0.003006243589722901,
+      "worst_trade": -175.64314836525688,
+      "policy_counts": {
+        "input": 37,
+        "blocked_by_hard_minute": 4,
+        "blocked_by_hard_pattern_minute": 1,
+        "size_scaled_by_soft_risk": 12,
+        "rejected_by_margin_or_limits": 0,
+        "output": 32
+      }
+    }
+  ]
+}
