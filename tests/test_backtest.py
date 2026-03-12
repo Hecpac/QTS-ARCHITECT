@@ -899,3 +899,145 @@ class TestEventEngineExitSemantics:
         assert metrics.volatility_annualized == pytest.approx(
             expected.volatility_annualized
         )
+
+
+# ==============================================================================
+# Stop-Loss Tests
+# ==============================================================================
+class _OpenLongOnceSupervisor:
+    """Opens a LONG on bar 1, then returns None."""
+
+    def __init__(self, instrument_id: InstrumentId) -> None:
+        self.instrument_id = instrument_id
+        self._calls = 0
+
+    async def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self._calls += 1
+        if self._calls == 1:
+            return TradingDecision(
+                instrument_id=self.instrument_id,
+                action=SignalType.LONG,
+                quantity_modifier=1.0,
+                rationale="open long only",
+            )
+        return None
+
+
+class TestStopLoss:
+    """Tests for per-position stop-loss in EventEngine."""
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_closes_long_at_threshold(self) -> None:
+        """A 5% drop should trigger stop-loss exit on a long position."""
+        instrument = InstrumentId("BTC/USDT")
+        supervisor = _OpenLongOnceSupervisor(instrument)
+        config = BacktestConfig(
+            initial_capital=100_000.0,
+            trade_size=10_000.0,
+            stop_loss_pct=0.05,
+            commission_bps=0.0,
+            slippage_bps=0.0,
+            force_close_positions_at_end=False,
+        )
+        engine = EventEngine(supervisor=supervisor, config=config)
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        data_feed = pl.DataFrame(
+            {
+                "timestamp": [
+                    start,
+                    start + timedelta(hours=1),
+                    start + timedelta(hours=2),
+                ],
+                "instrument_id": [str(instrument)] * 3,
+                "open": [100.0, 100.0, 95.0],
+                "high": [101.0, 100.5, 95.5],
+                "low": [99.0, 99.5, 94.0],
+                "close": [100.0, 100.0, 94.0],  # Bar 3: -6% from entry
+                "volume": [1000.0, 1000.0, 1000.0],
+            }
+        )
+
+        result = await engine.run(data_feed)
+
+        # Bar 1: LONG entry at 100. Bar 3: price drops to 94 → 6% loss > 5% threshold.
+        # Stop-loss should have closed the position.
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        # At least 2 trades: entry + stop-loss exit
+        assert result.total_trades >= 2
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_disabled_when_zero(self) -> None:
+        """With stop_loss_pct=0.0, positions should NOT be auto-closed."""
+        instrument = InstrumentId("BTC/USDT")
+        supervisor = _OpenLongOnceSupervisor(instrument)
+        config = BacktestConfig(
+            initial_capital=100_000.0,
+            trade_size=10_000.0,
+            stop_loss_pct=0.0,  # Disabled
+            commission_bps=0.0,
+            slippage_bps=0.0,
+            force_close_positions_at_end=False,
+        )
+        engine = EventEngine(supervisor=supervisor, config=config)
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        data_feed = pl.DataFrame(
+            {
+                "timestamp": [
+                    start,
+                    start + timedelta(hours=1),
+                ],
+                "instrument_id": [str(instrument)] * 2,
+                "open": [100.0, 90.0],
+                "high": [101.0, 91.0],
+                "low": [99.0, 89.0],
+                "close": [100.0, 90.0],  # -10% drop
+                "volume": [1000.0, 1000.0],
+            }
+        )
+
+        result = await engine.run(data_feed)
+
+        # Position should remain open (only 1 trade: the entry)
+        assert engine.state.get_position(instrument) != pytest.approx(0.0)
+        assert result.total_trades == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_closes_short_at_threshold(self) -> None:
+        """A price rise should trigger stop-loss on a short position."""
+        instrument = InstrumentId("BTC/USDT")
+        supervisor = _OpenShortOnlySupervisor(instrument)
+        config = BacktestConfig(
+            initial_capital=100_000.0,
+            trade_size=10_000.0,
+            stop_loss_pct=0.05,
+            commission_bps=0.0,
+            slippage_bps=0.0,
+            allow_shorting=True,
+            force_close_positions_at_end=False,
+        )
+        engine = EventEngine(supervisor=supervisor, config=config)
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        data_feed = pl.DataFrame(
+            {
+                "timestamp": [
+                    start,
+                    start + timedelta(hours=1),
+                    start + timedelta(hours=2),
+                ],
+                "instrument_id": [str(instrument)] * 3,
+                "open": [100.0, 100.0, 106.0],
+                "high": [101.0, 101.0, 107.0],
+                "low": [99.0, 99.0, 105.0],
+                "close": [100.0, 100.0, 106.0],  # +6% from short entry
+                "volume": [1000.0, 1000.0, 1000.0],
+            }
+        )
+
+        result = await engine.run(data_feed)
+
+        # Short entered at ~100, price goes to 106 → 6% loss > 5% threshold
+        assert engine.state.get_position(instrument) == pytest.approx(0.0)
+        assert result.total_trades >= 2

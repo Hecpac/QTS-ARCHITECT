@@ -127,6 +127,7 @@ class BacktestConfig(BaseModel):
         default_factory=tuple
     )
     high_volatility_hours_high_regime_utc: tuple[int, ...] = Field(default_factory=tuple)
+    stop_loss_pct: float = Field(default=0.0, ge=0.0, le=1.0)
     force_close_positions_at_end: bool = True
 
 
@@ -169,6 +170,7 @@ class PortfolioState:
     timestamps: list[datetime] = field(default_factory=list)
     short_opened_at: dict[InstrumentId, datetime] = field(default_factory=dict)
     short_borrow_fees_paid: float = 0.0
+    entry_prices: dict[InstrumentId, float] = field(default_factory=dict)
 
     def get_position(self, instrument_id: InstrumentId) -> float:
         """Get position quantity (0 if not held)."""
@@ -370,6 +372,38 @@ class EventEngine:
             # Mark to market using latest known prices across all instruments.
             last_prices[market_data.instrument_id] = market_data.close
             equity = self.state.mark_to_market(last_prices, ts)
+
+            # Per-position stop-loss check
+            if self.config.stop_loss_pct > 0:
+                for instr_id in list(self.state.positions):
+                    qty = self.state.positions.get(instr_id, 0.0)
+                    if abs(qty) < DUST_EPS:
+                        continue
+                    entry_price = self.state.entry_prices.get(instr_id)
+                    if not entry_price or entry_price <= 0:
+                        continue
+                    current_price = last_prices.get(instr_id, 0.0)
+                    if current_price <= 0:
+                        continue
+                    if qty > 0:
+                        loss_pct = (entry_price - current_price) / entry_price
+                    else:
+                        loss_pct = (current_price - entry_price) / entry_price
+                    if loss_pct >= self.config.stop_loss_pct:
+                        log.warning(
+                            "Stop-loss triggered",
+                            instrument=instr_id,
+                            entry=entry_price,
+                            current=current_price,
+                            loss_pct=f"{loss_pct:.2%}",
+                        )
+                        exit_decision = TradingDecision(
+                            instrument_id=instr_id,
+                            action=SignalType.EXIT,
+                            quantity_modifier=1.0,
+                            rationale=f"Stop-loss {self.config.stop_loss_pct:.1%}",
+                        )
+                        self._execute(exit_decision, market_data)
 
             # Build rolling OHLCV history for agents
             ohlcv_tuple: OHLCVTuple = (
@@ -775,6 +809,20 @@ class EventEngine:
         self.state.update_position(decision.instrument_id, quantity)
 
         new_position = self.state.get_position(decision.instrument_id)
+
+        # Track entry price for stop-loss
+        if new_position > DUST_EPS:
+            old_entry = self.state.entry_prices.get(decision.instrument_id, 0.0)
+            old_qty = prior_position if prior_position > DUST_EPS else 0.0
+            if old_qty > DUST_EPS and old_entry > 0:
+                self.state.entry_prices[decision.instrument_id] = (
+                    (old_qty * old_entry + quantity * price) / new_position
+                )
+            else:
+                self.state.entry_prices[decision.instrument_id] = price
+        elif abs(new_position) < DUST_EPS:
+            self.state.entry_prices.pop(decision.instrument_id, None)
+
         self._track_short_position_window(
             decision.instrument_id,
             prior_position=prior_position,
@@ -826,6 +874,21 @@ class EventEngine:
         self.state.update_position(decision.instrument_id, -quantity)
 
         new_position = self.state.get_position(decision.instrument_id)
+
+        # Track entry price for stop-loss
+        if new_position < -DUST_EPS:
+            old_entry = self.state.entry_prices.get(decision.instrument_id, 0.0)
+            old_qty = abs(prior_position) if prior_position < -DUST_EPS else 0.0
+            new_short_qty = abs(new_position)
+            if old_qty > DUST_EPS and old_entry > 0:
+                self.state.entry_prices[decision.instrument_id] = (
+                    (old_qty * old_entry + quantity * price) / new_short_qty
+                )
+            else:
+                self.state.entry_prices[decision.instrument_id] = price
+        elif abs(new_position) < DUST_EPS:
+            self.state.entry_prices.pop(decision.instrument_id, None)
+
         self._track_short_position_window(
             decision.instrument_id,
             prior_position=prior_position,

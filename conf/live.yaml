@@ -7,9 +7,6 @@ env: "dev"
 symbol: "BTC/USDT"
 symbols:
   - "BTC/USDT"
-  - "ETH/USDT"
-  - "SOL/USDT"
-  - "XRP/USDT"
 
 oms:
   initial_cash: 100000.0
@@ -24,12 +21,6 @@ supervisor:
 
 agents:
   strategies:
-    - _target_: qts_core.agents.base.TechnicalAgent
-      name: TrendFollower_A
-      bullish_threshold: 0.015  # Deep-dive 50d: filter noise; trigger only on >=1.5% 1h impulse
-    - _target_: qts_core.agents.base.TechnicalAgent
-      name: MeanReversion_B
-      bullish_threshold: 0.015  # Keep both technical agents aligned on stronger momentum filter
     - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
       name: ICT_Sniper_NY
       symbol: BTC/USDT
@@ -60,6 +51,7 @@ loop:
   heartbeat_key: "SYSTEM:HEARTBEAT"
   execution_timeout: 20.0
   max_session_drawdown: 0.10
+  stop_loss_pct: 0.02  # 2% max loss per individual position
   entry_cooldown_seconds: 60.0  # Balanced: was 90; redundant with per-candle limit
   max_entries_per_candle_per_symbol: 1
 

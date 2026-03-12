@@ -371,6 +371,13 @@ class LiveTrader:
         )
         self._session_peak_value: float | None = None
 
+        # Per-position stop-loss (0 disables).
+        self.stop_loss_pct: float = max(
+            0.0,
+            min(1.0, float(cfg.loop.get("stop_loss_pct", 0.0))),
+        )
+        self._position_entry_prices: dict[InstrumentId, float] = {}
+
     async def _fetch_live_data(self) -> MarketData:
         """Fetch live market data.
 
@@ -1193,6 +1200,56 @@ class LiveTrader:
             )
             return
 
+        # Per-position stop-loss check
+        if self.stop_loss_pct > 0:
+            for _sl_instr, _sl_qty in list(
+                self.oms.portfolio.positions.items()
+            ):
+                if abs(_sl_qty) < 1e-8:
+                    continue
+                _sl_entry = self._position_entry_prices.get(_sl_instr)
+                if not _sl_entry or _sl_entry <= 0:
+                    continue
+                _sl_mark = self._mark_for_instrument(
+                    _sl_instr, market_data.close
+                )
+                if _sl_mark <= 0:
+                    continue
+                if _sl_qty > 0:
+                    _sl_loss = (_sl_entry - _sl_mark) / _sl_entry
+                else:
+                    _sl_loss = (_sl_mark - _sl_entry) / _sl_entry
+                if _sl_loss >= self.stop_loss_pct:
+                    log.warning(
+                        "Per-position stop-loss triggered",
+                        instrument=_sl_instr,
+                        entry=_sl_entry,
+                        mark=_sl_mark,
+                        loss_pct=f"{_sl_loss:.2%}",
+                    )
+                    _sl_decision = TradingDecision(
+                        instrument_id=_sl_instr,
+                        action=SignalType.EXIT,
+                        quantity_modifier=1.0,
+                        rationale=f"Stop-loss {self.stop_loss_pct:.1%}",
+                        contributing_agents=["SYSTEM_STOP_LOSS"],
+                    )
+                    _sl_order = self.oms.process_decision(
+                        _sl_decision, current_price=_sl_mark,
+                    )
+                    if _sl_order:
+                        try:
+                            await asyncio.wait_for(
+                                self.ems.submit_order(_sl_order),
+                                timeout=self.execution_timeout,
+                            )
+                        except Exception as _sl_exc:
+                            log.error(
+                                "Stop-loss order failed",
+                                instrument=_sl_instr,
+                                error=str(_sl_exc),
+                            )
+
         decision: TradingDecision | None = None
         max_exposure_forced_exit = self.max_portfolio_exposure_forced_exit
         instrument_position = self._effective_position_qty(market_data.instrument_id)
@@ -1485,6 +1542,19 @@ class LiveTrader:
                 )
                 return
             self._record_order_view(order_request, fill_report)
+
+            # Track entry price for stop-loss
+            if fill_report.price and fill_report.price > 0:
+                _fill_instr = market_data.instrument_id
+                _fill_qty = self._effective_position_qty(_fill_instr)
+                if abs(_fill_qty) < 1e-8:
+                    self._position_entry_prices.pop(_fill_instr, None)
+                elif guarded_decision.action in {
+                    SignalType.LONG,
+                    SignalType.SHORT,
+                }:
+                    self._position_entry_prices[_fill_instr] = fill_report.price
+
             self._mark_entry_executed(
                 symbol=instrument_symbol,
                 action=guarded_decision.action,
