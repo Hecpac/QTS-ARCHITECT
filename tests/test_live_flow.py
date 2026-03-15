@@ -245,6 +245,7 @@ def test_guardrails_reduce_size_in_high_volatility():
         max_intrabar_volatility=0.05,
         high_volatility_size_scale=0.5,
         max_estimated_slippage_bps=1_000.0,
+        enable_dynamic_volatility_risk_scaling=False,  # isolate static scale test
     )
 
     assert guarded is not None

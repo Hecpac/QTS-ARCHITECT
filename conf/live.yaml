@@ -1,12 +1,19 @@
 defaults:
+  # Gateway options:
+  #   mock   — no credentials needed, simulated fills (default for dev)
+  #   oanda  — forex + metals (EUR/USD, GBP/USD, XAU/USD) — needs OANDA_API_TOKEN + OANDA_ACCOUNT_ID
+  #   ccxt   — crypto via Kraken — needs KRAKEN_API_KEY + KRAKEN_API_SECRET
+  #   alpaca — US stocks/ETFs — needs ALPACA_API_KEY + ALPACA_SECRET_KEY
   - gateway: mock
   - store: redis
   - _self_
 
 env: "dev"
-symbol: "BTC/USDT"
+symbol: "EUR/USD"
 symbols:
-  - "BTC/USDT"
+  - "EUR/USD"
+  - "GBP/USD"
+  - "XAU/USD"
 
 oms:
   initial_cash: 100000.0

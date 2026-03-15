@@ -1,0 +1,5 @@
+_target_: qts_core.execution.ems.OANDAGateway
+api_token: "${oc.env:OANDA_API_TOKEN,}"
+account_id: "${oc.env:OANDA_ACCOUNT_ID,}"
+paper_trading: true
+rate_limit: 2.0
