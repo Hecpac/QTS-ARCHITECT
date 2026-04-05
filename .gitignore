@@ -44,6 +44,12 @@ qts_core/outputs/
 /data/
 /logs/
 
+# Redis
+dump.rdb
+
+# Runtime logs
+main_live.log
+
 # OS
 .DS_Store
 Thumbs.db

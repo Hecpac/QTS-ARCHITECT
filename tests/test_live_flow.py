@@ -664,6 +664,7 @@ async def test_fetch_live_data_uses_cached_mark_when_market_calls_fail() -> None
     trader.symbol = "ETH/USDT"
     trader.tick_interval = 0.5
     trader._instrument_marks[InstrumentId("ETH/USDT")] = 1999.5
+    trader._last_fresh_data_at = datetime.now(timezone.utc)
 
     class BrokenExchange:
         async def fetch_ohlcv(self, *_args, **_kwargs):

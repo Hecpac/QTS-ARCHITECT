@@ -1,0 +1,28 @@
+{
+  "generated": "2026-03-29T17:48:08.422518+00:00",
+  "symbol": "BTC/USDT",
+  "timeframe": "1h",
+  "bars": 5034,
+  "baseline": {
+    "final_capital": 101387.07,
+    "total_return": "1.39%",
+    "trades": 31,
+    "sharpe": 0.438,
+    "sortino": 0.434,
+    "max_drawdown": "-4.14%",
+    "win_rate": "45.5%",
+    "profit_factor": 1.02,
+    "calmar": 0.586
+  },
+  "risk_layers": {
+    "final_capital": 101918.23,
+    "total_return": "1.92%",
+    "trades": 29,
+    "sharpe": 0.601,
+    "sortino": 0.596,
+    "max_drawdown": "-4.01%",
+    "win_rate": "45.2%",
+    "profit_factor": 1.02,
+    "calmar": 0.839
+  }
+}

@@ -4,7 +4,7 @@ import asyncio
 import atexit
 import json
 import logging
-import random
+import signal
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -18,7 +18,12 @@ from omegaconf import DictConfig, OmegaConf
 
 from qts_core.agents.protocol import SignalType, TradingDecision
 from qts_core.agents.supervisor import Supervisor
+from qts_core.agents.prediction_gate import GateState, PredictionMarketGate
+from qts_core.agents.sentiment_filter import SentimentFilter, SentimentState
+from qts_core.agents.signal_quality import SignalQuality, SignalQualityEvaluator
+from qts_core.agents.watchdog import DrawdownWatchdog, WatchdogState
 from qts_core.common.types import InstrumentId, MarketData
+from qts_core.models.regime import MarketRegime, RegimeDetector
 from qts_core.execution.ems import ExecutionError, ExecutionStatus
 from qts_core.execution.oms import OrderManagementSystem, OrderRequest
 
@@ -30,6 +35,46 @@ if TYPE_CHECKING:
 OHLCVTuple = tuple[datetime, float, float, float, float, float]
 
 log = structlog.get_logger()
+
+# ---------------------------------------------------------------------------
+# Data freshness constants
+# ---------------------------------------------------------------------------
+DEFAULT_MAX_DATA_AGE_SECONDS: float = 120.0  # 2 minutes
+STALE_DATA_CONSECUTIVE_LIMIT: int = 5  # halt after N consecutive stale ticks
+
+
+def validate_api_keys(cfg: DictConfig) -> None:
+    """Verify required API keys are available before starting the trading loop.
+
+    Raises RuntimeError for critical missing keys, warns for optional ones.
+    """
+    import os
+
+    # Anthropic API key — required if Claude agents are enabled
+    claude_cfg = cfg.get("strategy", {}).get("claude", {})
+    if claude_cfg.get("enabled", False):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY not set but Claude agents are enabled. "
+                "Set the env var or disable Claude agents in config."
+            )
+        log.info("api_key_check_passed", service="anthropic")
+
+    # Reddit credentials — optional (sentiment degrades gracefully)
+    if not (os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET")):
+        log.warning(
+            "api_key_missing_optional",
+            service="reddit",
+            impact="Sentiment loader will skip Reddit data",
+        )
+
+    # OANDA — required for forex/metals
+    oanda_cfg = cfg.get("exchange", {})
+    if oanda_cfg.get("name", "").lower() == "oanda":
+        if not os.environ.get("OANDA_API_TOKEN"):
+            raise RuntimeError(
+                "OANDA_API_TOKEN not set but OANDA exchange is configured."
+            )
 
 
 def apply_execution_guardrails(
@@ -313,6 +358,16 @@ class LiveTrader:
         self._last_ohlcv_history: list[OHLCVTuple] | None = None
         self._last_ohlcv_payload: list[dict[str, Any]] | None = None
 
+        # Async lock protecting mutable shared state
+        self._state_lock = asyncio.Lock()
+
+        # Data freshness tracking
+        self._max_data_age_seconds: float = float(
+            cfg.loop.get("max_data_age_seconds", DEFAULT_MAX_DATA_AGE_SECONDS)
+        )
+        self._consecutive_stale_ticks: int = 0
+        self._last_fresh_data_at: datetime | None = None
+
         # Persistence + components from Hydra config
         self.store: StateStore = instantiate(cfg.store)
         self.oms = OrderManagementSystem(
@@ -378,100 +433,297 @@ class LiveTrader:
         )
         self._position_entry_prices: dict[InstrumentId, float] = {}
 
-    async def _fetch_live_data(self) -> MarketData:
-        """Fetch live market data.
+        # Drawdown Watchdog (AutoResearch 2026-03-29: risk > intelligence)
+        watchdog_cfg = cfg.get("watchdog")
+        self.watchdog = DrawdownWatchdog(
+            warn_threshold=float(
+                watchdog_cfg.get("warn_threshold", 0.05) if watchdog_cfg else 0.05
+            ),
+            halt_threshold=float(
+                watchdog_cfg.get("halt_threshold", 0.08) if watchdog_cfg else 0.08
+            ),
+            weekly_halt_threshold=float(
+                watchdog_cfg.get("weekly_halt_threshold", 0.15)
+                if watchdog_cfg else 0.15
+            ),
+            reduce_factor=float(
+                watchdog_cfg.get("reduce_factor", 0.50) if watchdog_cfg else 0.50
+            ),
+            cooldown_bars=int(
+                watchdog_cfg.get("cooldown_bars", 30) if watchdog_cfg else 30
+            ),
+        )
 
-        If a CCXT gateway is available, fetch a small OHLCV window and use the
-        latest candle as the current MarketData event.
+        # Sentiment Filter (AutoResearch 2026-03-29: FinBERT blocks BUY < -0.70)
+        sentiment_cfg = cfg.get("sentiment")
+        self.sentiment_filter = SentimentFilter(
+            block_threshold=float(
+                sentiment_cfg.get("block_threshold", -0.70)
+                if sentiment_cfg else -0.70
+            ),
+            boost_threshold=float(
+                sentiment_cfg.get("boost_threshold", 0.70)
+                if sentiment_cfg else 0.70
+            ),
+            window_hours=float(
+                sentiment_cfg.get("window_hours", 6.0)
+                if sentiment_cfg else 6.0
+            ),
+            min_samples=int(
+                sentiment_cfg.get("min_samples", 3)
+                if sentiment_cfg else 3
+            ),
+        )
+
+        # Signal Quality Evaluator (whipsaw detection)
+        quality_cfg = cfg.get("signal_quality")
+        self.signal_quality = SignalQualityEvaluator(
+            window_signals=int(
+                quality_cfg.get("window_signals", 10) if quality_cfg else 10
+            ),
+            high_consistency=float(
+                quality_cfg.get("high_consistency", 0.70) if quality_cfg else 0.70
+            ),
+            medium_consistency=float(
+                quality_cfg.get("medium_consistency", 0.50) if quality_cfg else 0.50
+            ),
+            high_max_flip_rate=float(
+                quality_cfg.get("high_max_flip_rate", 0.20) if quality_cfg else 0.20
+            ),
+            medium_max_flip_rate=float(
+                quality_cfg.get("medium_max_flip_rate", 0.40) if quality_cfg else 0.40
+            ),
+            medium_size_scale=float(
+                quality_cfg.get("medium_size_scale", 0.60) if quality_cfg else 0.60
+            ),
+            min_samples=int(
+                quality_cfg.get("min_samples", 5) if quality_cfg else 5
+            ),
+            window_hours=float(
+                quality_cfg.get("window_hours", 24.0) if quality_cfg else 24.0
+            ),
+        )
+
+        # Prediction Market Gate (Polymarket contradiction filter)
+        prediction_cfg = cfg.get("prediction_gate")
+        self.prediction_gate = PredictionMarketGate(
+            block_threshold=float(
+                prediction_cfg.get("block_threshold", 0.80)
+                if prediction_cfg else 0.80
+            ),
+            warn_threshold=float(
+                prediction_cfg.get("warn_threshold", 0.65)
+                if prediction_cfg else 0.65
+            ),
+            warn_size_scale=float(
+                prediction_cfg.get("warn_size_scale", 0.50)
+                if prediction_cfg else 0.50
+            ),
+            window_hours=float(
+                prediction_cfg.get("window_hours", 12.0)
+                if prediction_cfg else 12.0
+            ),
+            min_signals=int(
+                prediction_cfg.get("min_signals", 1)
+                if prediction_cfg else 1
+            ),
+        )
+
+        # Regime Detector (AutoResearch 2026-03-29: ATR regime filters)
+        regime_cfg = cfg.get("regime")
+        self.regime_detector = RegimeDetector(
+            lookback=int(
+                regime_cfg.get("lookback", 100) if regime_cfg else 100
+            ),
+            atr_period=int(
+                regime_cfg.get("atr_period", 14) if regime_cfg else 14
+            ),
+            low_percentile=float(
+                regime_cfg.get("low_percentile", 0.25) if regime_cfg else 0.25
+            ),
+            high_percentile=float(
+                regime_cfg.get("high_percentile", 0.75) if regime_cfg else 0.75
+            ),
+            crisis_percentile=float(
+                regime_cfg.get("crisis_percentile", 0.95) if regime_cfg else 0.95
+            ),
+            high_vol_size_scale=float(
+                regime_cfg.get("high_vol_size_scale", 0.60)
+                if regime_cfg else 0.60
+            ),
+        )
+
+    def _validate_data_freshness(self, data_ts: datetime) -> bool:
+        """Validate that market data is not stale.
+
+        Args:
+            data_ts: Timestamp of the received market data.
+
+        Returns:
+            True if data is fresh, False if stale.
+        """
+        now = datetime.now(timezone.utc)
+        if data_ts.tzinfo is None:
+            data_ts = data_ts.replace(tzinfo=timezone.utc)
+
+        age_seconds = (now - data_ts).total_seconds()
+
+        if age_seconds > self._max_data_age_seconds:
+            self._consecutive_stale_ticks += 1
+            log.warning(
+                "Stale market data detected",
+                symbol=self.symbol,
+                age_seconds=age_seconds,
+                max_age_seconds=self._max_data_age_seconds,
+                consecutive_stale=self._consecutive_stale_ticks,
+            )
+            return False
+
+        # Data is fresh — reset counter
+        self._consecutive_stale_ticks = 0
+        self._last_fresh_data_at = now
+        return True
+
+    async def _fetch_live_data(self) -> MarketData | None:
+        """Fetch live market data with freshness validation.
+
+        Returns MarketData if fresh data is available, None if all sources
+        failed or data is stale. Never generates synthetic/random data.
 
         Notes:
         - Domain models remain DataFrame-free (no pandas/polars inside MarketData).
         - OHLCV is published separately via telemetry.
         """
         exchange = getattr(self.ems, "exchange", None)
-        if exchange:
-            timeframe = "1h"
-            if "trading" in self.cfg and self.cfg.trading.get("timeframe"):
-                timeframe = str(self.cfg.trading.timeframe)
+        if exchange is None:
+            log.error(
+                "No exchange gateway configured — cannot fetch live data",
+                symbol=self.symbol,
+            )
+            return None
 
-            try:
-                raw_ohlcv = await exchange.fetch_ohlcv(
-                    self.symbol,
-                    timeframe=timeframe,
-                    limit=50,
+        timeframe = "1h"
+        if "trading" in self.cfg and self.cfg.trading.get("timeframe"):
+            timeframe = str(self.cfg.trading.timeframe)
+
+        # --- Source 1: OHLCV candles (preferred) ---
+        try:
+            raw_ohlcv = await exchange.fetch_ohlcv(
+                self.symbol,
+                timeframe=timeframe,
+                limit=50,
+            )
+        except Exception as exc:
+            log.warning(
+                "fetch_ohlcv failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                symbol=self.symbol,
+            )
+            raw_ohlcv = []
+
+        ohlcv_history: list[OHLCVTuple] = []
+        ohlcv_payload: list[dict[str, Any]] = []
+
+        for row in raw_ohlcv:
+            ts_ms, open_, high, low, close, volume = row
+            ts = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc)
+            ohlcv_history.append(
+                (
+                    ts,
+                    float(open_),
+                    float(high),
+                    float(low),
+                    float(close),
+                    float(volume),
                 )
-            except Exception as exc:
-                log.warning("fetch_ohlcv failed", error=str(exc), symbol=self.symbol)
-                raw_ohlcv = []
+            )
+            ohlcv_payload.append(
+                {
+                    "timestamp": ts.isoformat(),
+                    "open": float(open_),
+                    "high": float(high),
+                    "low": float(low),
+                    "close": float(close),
+                    "volume": float(volume),
+                }
+            )
 
-            ohlcv_history: list[OHLCVTuple] = []
-            ohlcv_payload: list[dict[str, Any]] = []
-
-            for row in raw_ohlcv:
-                ts_ms, open_, high, low, close, volume = row
-                ts = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc)
-                ohlcv_history.append(
-                    (
-                        ts,
-                        float(open_),
-                        float(high),
-                        float(low),
-                        float(close),
-                        float(volume),
-                    )
-                )
-                ohlcv_payload.append(
-                    {
-                        "timestamp": ts.isoformat(),
-                        "open": float(open_),
-                        "high": float(high),
-                        "low": float(low),
-                        "close": float(close),
-                        "volume": float(volume),
-                    }
-                )
-
-            if ohlcv_history:
+        if ohlcv_history:
+            async with self._state_lock:
                 self._last_ohlcv_history = ohlcv_history
                 self._last_ohlcv_payload = ohlcv_payload
 
-                latest_ts, open_, high, low, close, volume = ohlcv_history[-1]
-                return MarketData(
-                    instrument_id=InstrumentId(self.symbol),
-                    timestamp=latest_ts,
-                    open=open_,
-                    high=high,
-                    low=low,
-                    close=close,
-                    volume=volume,
+            latest_ts, open_, high, low, close, volume = ohlcv_history[-1]
+
+            if not self._validate_data_freshness(latest_ts):
+                self._emit_alert(
+                    level="WARNING",
+                    event="STALE_OHLCV_DATA",
+                    message=f"OHLCV data is stale for {self.symbol}",
+                    details={
+                        "symbol": self.symbol,
+                        "data_age_seconds": (
+                            datetime.now(timezone.utc) - latest_ts
+                        ).total_seconds(),
+                        "consecutive_stale": self._consecutive_stale_ticks,
+                    },
                 )
+                # Stale data: skip this tick (don't trade on old prices)
+                return None
 
-            # Data-fetch fallback for live gateways: do NOT sleep or inject synthetic prices.
-            # Prefer ticker snapshot, then cached mark, then last market data for this symbol.
-            price: float | None = None
+            return MarketData(
+                instrument_id=InstrumentId(self.symbol),
+                timestamp=latest_ts,
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+            )
 
-            try:
-                ticker = await exchange.fetch_ticker(self.symbol)
-                last_price = ticker.get("last") or ticker.get("close")
-                if last_price:
-                    price = float(last_price)
-            except Exception as exc:
-                log.warning("fetch_ticker failed", error=str(exc), symbol=self.symbol)
+        # --- Source 2: Ticker snapshot fallback ---
+        price: float | None = None
+        try:
+            ticker = await exchange.fetch_ticker(self.symbol)
+            last_price = ticker.get("last") or ticker.get("close")
+            if last_price:
+                price = float(last_price)
+        except Exception as exc:
+            log.warning(
+                "fetch_ticker failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                symbol=self.symbol,
+            )
 
-            if price is None or price <= 0:
-                cached_mark = self._instrument_marks.get(InstrumentId(self.symbol))
-                if cached_mark and cached_mark > 0:
-                    price = float(cached_mark)
+        # --- Source 3: Cached mark (with age check) ---
+        if price is None or price <= 0:
+            if self._last_fresh_data_at is not None:
+                cache_age = (
+                    datetime.now(timezone.utc) - self._last_fresh_data_at
+                ).total_seconds()
+                if cache_age <= self._max_data_age_seconds:
+                    cached_mark = self._instrument_marks.get(
+                        InstrumentId(self.symbol)
+                    )
+                    if cached_mark and cached_mark > 0:
+                        price = float(cached_mark)
+                        log.info(
+                            "Using cached mark (within freshness window)",
+                            symbol=self.symbol,
+                            cache_age_seconds=cache_age,
+                        )
+                else:
+                    log.warning(
+                        "Cached mark too old, skipping",
+                        symbol=self.symbol,
+                        cache_age_seconds=cache_age,
+                    )
 
-            if (
-                (price is None or price <= 0)
-                and self._last_market_data is not None
-                and str(self._last_market_data.instrument_id) == self.symbol
-            ):
-                price = float(self._last_market_data.close)
-
-            if price is not None and price > 0:
-                ts = datetime.now(timezone.utc)
+        if price is not None and price > 0:
+            ts = datetime.now(timezone.utc)
+            async with self._state_lock:
                 self._last_ohlcv_history = [(ts, price, price, price, price, 0.0)]
                 self._last_ohlcv_payload = [
                     {
@@ -483,42 +735,33 @@ class LiveTrader:
                         "volume": 0.0,
                     }
                 ]
-                return MarketData(
-                    instrument_id=InstrumentId(self.symbol),
-                    timestamp=ts,
-                    open=price,
-                    high=price,
-                    low=price,
-                    close=price,
-                    volume=0.0,
-                )
+            return MarketData(
+                instrument_id=InstrumentId(self.symbol),
+                timestamp=ts,
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=0.0,
+            )
 
-        # Fallback simulation (non-live/mock flows only).
-        await asyncio.sleep(self.tick_interval)
-        price = 100_000.0 + random.uniform(-100, 100)  # noqa: S311
-        ts = datetime.now(timezone.utc)
-
-        self._last_ohlcv_history = [(ts, price, price + 50, price - 50, price, 0.0)]
-        self._last_ohlcv_payload = [
-            {
-                "timestamp": ts.isoformat(),
-                "open": price,
-                "high": price + 50,
-                "low": price - 50,
-                "close": price,
-                "volume": 0.0,
-            }
-        ]
-
-        return MarketData(
-            instrument_id=InstrumentId(self.symbol),
-            timestamp=ts,
-            open=price,
-            high=price + 50,
-            low=price - 50,
-            close=price,
-            volume=random.uniform(0.1, 5.0),  # noqa: S311
+        # --- All sources exhausted: return None instead of synthetic data ---
+        self._consecutive_stale_ticks += 1
+        log.error(
+            "All data sources exhausted — no fresh price available",
+            symbol=self.symbol,
+            consecutive_stale=self._consecutive_stale_ticks,
         )
+        self._emit_alert(
+            level="ERROR",
+            event="DATA_FEED_EXHAUSTED",
+            message=f"No live price available for {self.symbol}",
+            details={
+                "symbol": self.symbol,
+                "consecutive_stale": self._consecutive_stale_ticks,
+            },
+        )
+        return None
 
     def _halt_requested(self) -> bool:
         halt_flag = self.store.get("SYSTEM:HALT")
@@ -1162,8 +1405,20 @@ class LiveTrader:
             log.error("Data Feed Error", symbol=symbol, error=str(exc))
             return
 
+        if market_data is None:
+            # Check if consecutive stale ticks warrant an emergency halt
+            if self._consecutive_stale_ticks >= STALE_DATA_CONSECUTIVE_LIMIT:
+                await self._trigger_emergency_halt(
+                    reason=(
+                        f"Data feed dead: {self._consecutive_stale_ticks} consecutive "
+                        f"stale ticks for {symbol}"
+                    ),
+                )
+            return
+
         instrument_symbol = str(market_data.instrument_id)
-        self._instrument_marks[market_data.instrument_id] = market_data.close
+        async with self._state_lock:
+            self._instrument_marks[market_data.instrument_id] = market_data.close
         self._publish_telemetry(market_data)
         log.info(
             "Tick Received",
@@ -1175,19 +1430,21 @@ class LiveTrader:
 
         # Portfolio-level exposure for risk layer (multi-instrument aware,
         # includes blocked inventory from pending CLOSE_LONG orders).
-        total_value = self._compute_total_value(market_data.close)
-        daily_pnl_fraction = self._compute_daily_pnl_fraction(
-            total_value,
-            market_data.timestamp,
-        )
-        portfolio_exposure = self._compute_portfolio_exposure_fraction(
-            market_data.close,
-            total_value,
-        )
-        short_exposure_fraction = self._compute_short_exposure_fraction(
-            market_data.close,
-            total_value,
-        )
+        # Protected by _state_lock to prevent concurrent mutation.
+        async with self._state_lock:
+            total_value = self._compute_total_value(market_data.close)
+            daily_pnl_fraction = self._compute_daily_pnl_fraction(
+                total_value,
+                market_data.timestamp,
+            )
+            portfolio_exposure = self._compute_portfolio_exposure_fraction(
+                market_data.close,
+                total_value,
+            )
+            short_exposure_fraction = self._compute_short_exposure_fraction(
+                market_data.close,
+                total_value,
+            )
 
         session_drawdown = self._compute_session_drawdown_fraction(total_value)
         if (
@@ -1199,6 +1456,43 @@ class LiveTrader:
                 total_value=total_value,
             )
             return
+
+        # ── Drawdown Watchdog gate ──────────────────────────────────
+        watchdog_verdict = self.watchdog.evaluate(
+            current_equity=total_value,
+            timestamp=market_data.timestamp,
+        )
+        if watchdog_verdict.state == WatchdogState.HALTED:
+            log.warning(
+                "Watchdog HALTED — skipping tick",
+                reason=watchdog_verdict.reason,
+                drawdown=f"{watchdog_verdict.drawdown_pct:.2%}",
+                equity=total_value,
+                peak=watchdog_verdict.peak_equity,
+            )
+            self._publish_telemetry(market_data, total_value)
+            return
+
+        # ── Regime Detection gate ──────────────────────────────────
+        regime_verdict = self.regime_detector.update(
+            high=market_data.high,
+            low=market_data.low,
+            close=market_data.close,
+        )
+        if regime_verdict.regime == MarketRegime.CRISIS:
+            log.warning(
+                "REGIME CRISIS — skipping tick",
+                reason=regime_verdict.reason,
+                atr=f"{regime_verdict.current_atr:.6f}",
+                percentile=f"{regime_verdict.atr_percentile:.0%}",
+            )
+            self._publish_telemetry(market_data, total_value)
+            return
+
+        # ── Sentiment Filter evaluation ───────────────────────────────
+        sentiment_verdict = self.sentiment_filter.evaluate(
+            now=market_data.timestamp,
+        )
 
         # Per-position stop-loss check
         if self.stop_loss_pct > 0:
@@ -1306,6 +1600,110 @@ class LiveTrader:
 
         if not decision:
             return
+
+        # ── Sentiment Filter gate (block LONG entries) ────────────
+        if (
+            sentiment_verdict.block_longs
+            and decision.action != SignalType.EXIT
+        ):
+            log.warning(
+                "SENTIMENT FILTER — blocking LONG entry",
+                reason=sentiment_verdict.reason,
+                avg_sentiment=f"{sentiment_verdict.avg_sentiment:.3f}",
+                samples=sentiment_verdict.sample_count,
+            )
+            return
+
+        # ── Signal Quality gate (whipsaw detection) ─────────────────
+        self.signal_quality.record_signal(
+            direction=decision.action,
+            confidence=decision.quantity_modifier,
+            timestamp=market_data.timestamp,
+        )
+        if decision.action != SignalType.EXIT:
+            quality_verdict = self.signal_quality.evaluate(now=market_data.timestamp)
+            if quality_verdict.block_entry:
+                log.warning(
+                    "SIGNAL QUALITY — blocking entry (whipsaw)",
+                    reason=quality_verdict.reason,
+                    consistency=f"{quality_verdict.consistency:.0%}",
+                    flip_rate=f"{quality_verdict.flip_rate:.0%}",
+                )
+                return
+
+        # ── Prediction Market gate ────────────────────────────────
+        if decision.action != SignalType.EXIT:
+            pred_verdict = self.prediction_gate.evaluate(
+                trade_direction=decision.action,
+                now=market_data.timestamp,
+            )
+            if pred_verdict.block_trade:
+                log.warning(
+                    "PREDICTION GATE — blocking trade",
+                    reason=pred_verdict.reason,
+                    contradiction=f"{pred_verdict.strongest_contradiction:.0%}",
+                    signals=pred_verdict.signal_count,
+                )
+                return
+        else:
+            pred_verdict = None
+
+        # ── Compound risk scaling ─────────────────────────────────
+        if decision.action != SignalType.EXIT:
+            quality_mult = (
+                quality_verdict.size_multiplier
+                if quality_verdict.quality == SignalQuality.MEDIUM
+                else 1.0
+            )
+            pred_mult = (
+                pred_verdict.size_multiplier
+                if pred_verdict and pred_verdict.state == GateState.REDUCED
+                else 1.0
+            )
+            combined_multiplier = (
+                watchdog_verdict.size_multiplier
+                * regime_verdict.size_multiplier
+                * quality_mult
+                * pred_mult
+            )
+            if combined_multiplier < 1.0:
+                scaled_modifier = decision.quantity_modifier * combined_multiplier
+                parts: list[str] = []
+                if watchdog_verdict.size_multiplier < 1.0:
+                    parts.append(
+                        f"Watchdog {watchdog_verdict.state.value} "
+                        f"{watchdog_verdict.size_multiplier:.0%}"
+                    )
+                if regime_verdict.size_multiplier < 1.0:
+                    parts.append(
+                        f"Regime {regime_verdict.regime.value} "
+                        f"{regime_verdict.size_multiplier:.0%}"
+                    )
+                if quality_mult < 1.0:
+                    parts.append(
+                        f"SignalQuality {quality_verdict.quality.value} "
+                        f"{quality_mult:.0%}"
+                    )
+                if pred_mult < 1.0:
+                    parts.append(
+                        f"PredictionGate {pred_verdict.state.value} "
+                        f"{pred_mult:.0%}"
+                    )
+                decision = decision.model_copy(
+                    update={
+                        "quantity_modifier": scaled_modifier,
+                        "rationale": (
+                            f"{decision.rationale} | "
+                            + "; ".join(parts)
+                        ),
+                    }
+                )
+                log.info(
+                    "Risk scaling applied",
+                    watchdog=watchdog_verdict.size_multiplier,
+                    regime=regime_verdict.size_multiplier,
+                    combined=combined_multiplier,
+                )
 
         if decision.action == SignalType.EXIT:
             guarded_decision = decision
@@ -1612,6 +2010,10 @@ class LiveTrader:
                     details={"error": str(exc)},
                 )
 
+            # Initialize watchdog with current portfolio value
+            initial_equity = self.oms.portfolio.cash + self.oms.portfolio.blocked_cash
+            self.watchdog.reset(initial_equity)
+
             while self.running:
                 cycle_started_at = time.monotonic()
 
@@ -1661,14 +2063,31 @@ class LiveTrader:
 
 @hydra.main(version_base=None, config_path="../../../conf", config_name="live")
 def app(cfg: DictConfig) -> None:
-    """Hydra entrypoint for the live trader."""
+    """Hydra entrypoint for the live trader with graceful shutdown."""
     configure_logging()
     log.info(
         "Hydra configuration loaded",
         config=OmegaConf.to_container(cfg, resolve=True),
     )
+    validate_api_keys(cfg)
     trader = LiveTrader(cfg)
-    asyncio.run(trader.run())
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _handle_signal(sig: int, _frame: Any) -> None:
+        """Handle SIGTERM/SIGINT for graceful shutdown."""
+        sig_name = signal.Signals(sig).name
+        log.info("Received signal, initiating graceful shutdown", signal=sig_name)
+        trader.running = False
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    try:
+        loop.run_until_complete(trader.run())
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

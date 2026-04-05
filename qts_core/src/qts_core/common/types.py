@@ -59,6 +59,7 @@ class SecurityType(str, Enum):
     EQUITY = "EQUITY"
     FUTURE = "FUTURE"
     OPTION = "OPTION"
+    PREDICTION_MARKET = "PREDICTION_MARKET"
 
 
 class OrderSide(str, Enum):

@@ -1,16 +1,22 @@
+"""Alert relay: polls Redis and forwards alerts to Slack / Telegram.
+
+Security improvements:
+- Uses httpx instead of urllib.request for proper TLS verification
+- URL validation to prevent SSRF
+- Redis connection with password support
+"""
+
 from __future__ import annotations
 
 import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import redis
-
 
 Sender = Callable[[str], None]
 
@@ -22,6 +28,37 @@ _SEVERITY_SCORE = {
     "CRITICAL": 50,
 }
 
+# Allowed HTTPS hosts for outbound webhook requests (SSRF prevention)
+_ALLOWED_WEBHOOK_HOSTS: frozenset[str] = frozenset({
+    "hooks.slack.com",
+    "api.telegram.org",
+})
+
+
+def _validate_webhook_url(url: str) -> str:
+    """Validate that a webhook URL is HTTPS and targets an allowed host.
+
+    Args:
+        url: The webhook URL to validate.
+
+    Returns:
+        The validated URL.
+
+    Raises:
+        ValueError: If the URL is invalid or targets a disallowed host.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Webhook URL must use HTTPS, got: {parsed.scheme}")
+
+    if parsed.hostname not in _ALLOWED_WEBHOOK_HOSTS:
+        raise ValueError(
+            f"Webhook host '{parsed.hostname}' not in allowed list: "
+            f"{_ALLOWED_WEBHOOK_HOSTS}"
+        )
+
+    return url
+
 
 @dataclass(frozen=True)
 class AlertRelayConfig:
@@ -30,6 +67,7 @@ class AlertRelayConfig:
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
+    redis_password: str | None = None
     alert_key: str = "ALERTS:LAST"
     poll_interval_seconds: float = 2.0
     http_timeout_seconds: float = 5.0
@@ -46,6 +84,7 @@ class AlertRelayConfig:
             redis_host=os.getenv("REDIS_HOST", "localhost"),
             redis_port=int(os.getenv("REDIS_PORT", "6379")),
             redis_db=int(os.getenv("REDIS_DB", "0")),
+            redis_password=os.getenv("REDIS_PASSWORD"),
             alert_key=os.getenv("ALERT_KEY", "ALERTS:LAST"),
             poll_interval_seconds=float(os.getenv("ALERT_POLL_SECONDS", "2")),
             http_timeout_seconds=float(os.getenv("ALERT_HTTP_TIMEOUT_SECONDS", "5")),
@@ -99,16 +138,18 @@ def level_passes_filter(level: str, min_level: str) -> bool:
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> None:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    """POST JSON payload via httpx with TLS verification."""
+    import httpx
 
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-        _ = response.read()
+    _validate_webhook_url(url)
+
+    response = httpx.post(
+        url,
+        json=payload,
+        timeout=timeout_seconds,
+        # httpx verifies TLS certificates by default
+    )
+    response.raise_for_status()
 
 
 def send_to_slack(text: str, *, webhook_url: str, timeout_seconds: float) -> None:
@@ -141,7 +182,7 @@ class AlertRelay:
 
     def __init__(
         self,
-        redis_client: redis.Redis,
+        redis_client: redis.Redis,  # type: ignore[type-arg]
         *,
         alert_key: str,
         senders: list[Sender],
@@ -158,7 +199,10 @@ class AlertRelay:
         try:
             payload = self.redis_client.get(self.alert_key)
         except Exception as exc:
-            print(f"[alert-relay] redis read failed: {exc}", file=sys.stderr)
+            print(
+                f"[alert-relay] redis read failed (key={self.alert_key}): {exc}",
+                file=sys.stderr,
+            )
             return False
 
         if payload is None or payload == self._last_payload:
@@ -177,11 +221,6 @@ class AlertRelay:
         for sender in self.senders:
             try:
                 sender(message)
-            except urllib.error.URLError as exc:
-                print(
-                    f"[alert-relay] sender network error: {exc}",
-                    file=sys.stderr,
-                )
             except Exception as exc:
                 print(f"[alert-relay] sender failed: {exc}", file=sys.stderr)
 
@@ -193,6 +232,8 @@ def build_senders(config: AlertRelayConfig) -> list[Sender]:
     senders: list[Sender] = []
 
     if config.slack_webhook_url:
+        # Validate at build time, not at send time
+        _validate_webhook_url(config.slack_webhook_url)
         senders.append(
             lambda text: send_to_slack(
                 text,
@@ -222,6 +263,7 @@ def main() -> None:
         host=config.redis_host,
         port=config.redis_port,
         db=config.redis_db,
+        password=config.redis_password,
         decode_responses=True,
     )
 

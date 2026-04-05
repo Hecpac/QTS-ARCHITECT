@@ -1,0 +1,60 @@
+# ==============================================================================
+# Hybrid Strategy: ICT Smart Money + Claude AI Ensemble
+# ==============================================================================
+# Combines deterministic ICT pattern detection with LLM-powered analysis.
+# The Supervisor uses MAJORITY_VOTE consensus so Claude must agree with ICT
+# to execute a trade (reduces false positives from either agent alone).
+#
+# Usage:
+#   python -m qts_core.main_live strategy=claude_hybrid
+#
+# Requirements:
+#   - ANTHROPIC_API_KEY environment variable must be set
+# ==============================================================================
+
+agents:
+  strategies:
+    # Agent 1: Deterministic ICT Smart Money patterns (fast, no API cost)
+    - _target_: qts_core.agents.ict.ICTSmartMoneyAgent
+      name: ICT_Sniper_NY
+      symbol: ${symbol}
+      session_start: 8
+      session_end: 11
+      session_timezone: America/New_York
+      enable_session_range_breakout_reversal: true
+      session_range_breakout_only: false
+      enable_high_breakout_short: false
+      enable_low_breakout_long: true
+      exit_on_session_target_hit: true
+      breakout_buffer_bps: 5.0
+
+    # Agent 2: Claude-powered market analysis (slower, API cost per call)
+    - _target_: qts_core.agents.claude_agent.ClaudeStrategyAgent
+      name: Claude_Analyst
+      model: claude-sonnet-4-20250514
+      timeout: 15.0
+      max_tokens: 1024
+      min_confidence: 0.65
+      extra_context: ""
+
+    # Agent 3: Claude sentiment overlay (optional, lower priority)
+    - _target_: qts_core.agents.claude_agent.ClaudeSentimentAgent
+      name: Claude_Sentiment
+      model: claude-sonnet-4-20250514
+      timeout: 10.0
+      min_confidence: 0.60
+
+  risk:
+    # Claude-enhanced risk agent (hard rules + LLM reasoning)
+    _target_: qts_core.agents.claude_agent.ClaudeRiskAgent
+    name: Claude_Risk_Officer
+    model: claude-sonnet-4-20250514
+    timeout: 10.0
+    max_position_size: 0.15
+    max_daily_loss: 0.02
+    max_short_exposure: 0.15
+
+supervisor:
+  # MAJORITY_VOTE: at least 2 of 3 agents must agree for a trade
+  consensus_strategy: majority_vote
+  min_confidence: 0.60

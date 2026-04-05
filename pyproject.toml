@@ -57,7 +57,14 @@ redis = "^5.0.0"               # State persistence and pub/sub
 ccxt = "^4.0.0"                # Unified crypto exchange API
 tenacity = "^8.0.0"            # Retry logic with exponential backoff
 alpaca-py = "^0.32.0"          # Alpaca Markets API (Stocks/Crypto)
-httpx = ">=0.27.0"             # Async HTTP client for OANDA REST API
+httpx = ">=0.27.0"             # Async HTTP client for OANDA REST API + alert relay
+
+# AI / LLM Integration
+anthropic = ">=0.40.0"         # Claude Agent SDK for LLM-powered agents
+
+# Sentiment / Web Scraping
+aiohttp = "^3.9.0"             # Async HTTP for Reddit API & sentiment loader
+firecrawl-py = ">=1.0.0"       # Web scraping for X/Twitter sentiment (CLI)
 
 # Machine Learning
 hmmlearn = "^0.3.0"            # Hidden Markov Models for regime detection

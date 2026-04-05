@@ -29,5 +29,9 @@ RUN poetry config virtualenvs.create false \
 
 EXPOSE 8501
 
-# Default command (overridden in docker-compose)
+# STOPSIGNAL ensures Docker sends SIGTERM (not SIGKILL) for graceful shutdown.
+STOPSIGNAL SIGTERM
+
+# Default command (overridden in docker-compose).
+# exec form ensures signals propagate directly to the Python process.
 CMD ["python", "-m", "qts_core.main_live"]

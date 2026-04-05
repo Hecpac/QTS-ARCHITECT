@@ -23,9 +23,14 @@ import numpy as np
 import structlog
 from pydantic import BaseModel, Field
 
+from qts_core.agents.prediction_gate import GateState, PredictionMarketGate
 from qts_core.agents.protocol import SignalType, TradingDecision
+from qts_core.agents.sentiment_filter import SentimentFilter
+from qts_core.agents.signal_quality import SignalQuality, SignalQualityEvaluator
+from qts_core.agents.watchdog import DrawdownWatchdog, WatchdogState
 from qts_core.backtest.metrics import MetricsCalculator, PerformanceMetrics
 from qts_core.common.types import InstrumentId, MarketData
+from qts_core.models.regime import MarketRegime, RegimeDetector
 
 
 if TYPE_CHECKING:
@@ -129,6 +134,28 @@ class BacktestConfig(BaseModel):
     high_volatility_hours_high_regime_utc: tuple[int, ...] = Field(default_factory=tuple)
     stop_loss_pct: float = Field(default=0.0, ge=0.0, le=1.0)
     force_close_positions_at_end: bool = True
+
+    # ── Risk Management Layers ──────────────────────────────────
+    risk_layers_enabled: bool = False
+
+    # Watchdog
+    watchdog_warn_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
+    watchdog_halt_threshold: float = Field(default=0.08, ge=0.0, le=1.0)
+    watchdog_weekly_halt_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    watchdog_reduce_factor: float = Field(default=0.50, ge=0.0, le=1.0)
+    watchdog_cooldown_bars: int = Field(default=30, ge=0)
+
+    # Regime Detector
+    regime_lookback: int = Field(default=100, ge=10)
+    regime_atr_period: int = Field(default=14, ge=2)
+    regime_high_percentile: float = Field(default=0.75, ge=0.0, le=1.0)
+    regime_crisis_percentile: float = Field(default=0.95, ge=0.0, le=1.0)
+    regime_high_vol_size_scale: float = Field(default=0.60, ge=0.0, le=1.0)
+
+    # Signal Quality
+    signal_quality_window: int = Field(default=10, ge=2)
+    signal_quality_min_samples: int = Field(default=5, ge=1)
+    signal_quality_medium_size_scale: float = Field(default=0.60, ge=0.0, le=1.0)
 
 
 class BacktestResult(BaseModel):
@@ -265,6 +292,32 @@ class EventEngine:
         self._last_close_by_instrument: dict[InstrumentId, float] = {}
         self._recent_abs_log_returns: dict[InstrumentId, deque[float]] = {}
 
+        # ── Risk management layers ──────────────────────────────
+        if self.config.risk_layers_enabled:
+            self._watchdog = DrawdownWatchdog(
+                warn_threshold=self.config.watchdog_warn_threshold,
+                halt_threshold=self.config.watchdog_halt_threshold,
+                weekly_halt_threshold=self.config.watchdog_weekly_halt_threshold,
+                reduce_factor=self.config.watchdog_reduce_factor,
+                cooldown_bars=self.config.watchdog_cooldown_bars,
+            )
+            self._regime = RegimeDetector(
+                lookback=self.config.regime_lookback,
+                atr_period=self.config.regime_atr_period,
+                high_percentile=self.config.regime_high_percentile,
+                crisis_percentile=self.config.regime_crisis_percentile,
+                high_vol_size_scale=self.config.regime_high_vol_size_scale,
+            )
+            self._signal_quality = SignalQualityEvaluator(
+                window_signals=self.config.signal_quality_window,
+                min_samples=self.config.signal_quality_min_samples,
+                medium_size_scale=self.config.signal_quality_medium_size_scale,
+            )
+        else:
+            self._watchdog = None
+            self._regime = None
+            self._signal_quality = None
+
     @property
     def history(self) -> list[dict]:
         """Backward compatible trade history."""
@@ -373,6 +426,29 @@ class EventEngine:
             last_prices[market_data.instrument_id] = market_data.close
             equity = self.state.mark_to_market(last_prices, ts)
 
+            # ── Risk layer: Watchdog + Regime ─────────────────────
+            watchdog_verdict = None
+            regime_verdict = None
+            if self._watchdog is not None:
+                if bars_processed == 0:
+                    self._watchdog.reset(equity)
+                watchdog_verdict = self._watchdog.evaluate(
+                    current_equity=equity, timestamp=ts,
+                )
+                if watchdog_verdict.state == WatchdogState.HALTED:
+                    bars_processed += 1
+                    continue
+
+            if self._regime is not None:
+                regime_verdict = self._regime.update(
+                    high=market_data.high,
+                    low=market_data.low,
+                    close=market_data.close,
+                )
+                if regime_verdict.regime == MarketRegime.CRISIS:
+                    bars_processed += 1
+                    continue
+
             # Per-position stop-loss check
             if self.config.stop_loss_pct > 0:
                 for instr_id in list(self.state.positions):
@@ -437,6 +513,35 @@ class EventEngine:
                 portfolio_exposure=portfolio_exposure,
                 short_exposure_fraction=short_exposure_fraction,
             )
+
+            # ── Risk layer: post-decision gates + scaling ──────────
+            if decision and decision.action != SignalType.EXIT and self.config.risk_layers_enabled:
+                # Signal quality gate
+                q_mult = 1.0
+                if self._signal_quality is not None:
+                    self._signal_quality.record_signal(
+                        direction=decision.action,
+                        confidence=decision.quantity_modifier,
+                        timestamp=ts,
+                    )
+                    qv = self._signal_quality.evaluate(now=ts)
+                    if qv.block_entry:
+                        decision = None
+                    elif qv.quality == SignalQuality.MEDIUM:
+                        q_mult = qv.size_multiplier
+
+                # Compound scaling (watchdog × regime × quality)
+                if decision is not None:
+                    w_mult = watchdog_verdict.size_multiplier if watchdog_verdict else 1.0
+                    r_mult = regime_verdict.size_multiplier if regime_verdict else 1.0
+                    compound = w_mult * r_mult * q_mult
+                    if compound < 1.0:
+                        decision = decision.model_copy(
+                            update={
+                                "quantity_modifier": decision.quantity_modifier * compound,
+                                "rationale": f"{decision.rationale} | Risk scale {compound:.0%}",
+                            }
+                        )
 
             # Execute
             if decision:

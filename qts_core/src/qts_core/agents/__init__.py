@@ -47,6 +47,11 @@ from qts_core.agents.base import (
     StrictRiskAgent,
     TechnicalAgent,
 )
+from qts_core.agents.claude_agent import (
+    ClaudeRiskAgent,
+    ClaudeSentimentAgent,
+    ClaudeStrategyAgent,
+)
 from qts_core.agents.ict import ICTSmartMoneyAgent
 from qts_core.agents.protocol import (
     AgentPriority,
@@ -67,6 +72,9 @@ __all__ = [
     "AgentSignal",
     "BaseRiskAgent",
     "BaseStrategyAgent",
+    "ClaudeRiskAgent",
+    "ClaudeSentimentAgent",
+    "ClaudeStrategyAgent",
     "ConsensusStrategy",
     "ICTSmartMoneyAgent",
     "PermissiveRiskAgent",

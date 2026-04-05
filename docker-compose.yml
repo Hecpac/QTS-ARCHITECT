@@ -32,6 +32,14 @@ services:
     # Use env-driven config (conf/store/redis.yaml reads REDIS_URL)
     command: python -m qts_core.main_live
     restart: on-failure
+    # Give the trader time to liquidate positions before SIGKILL
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; r=redis.from_url('redis://redis:6379/0'); assert r.exists('SYSTEM:HEARTBEAT')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   dashboard:
     build:
