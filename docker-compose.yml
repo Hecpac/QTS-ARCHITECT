@@ -4,11 +4,12 @@ services:
     container_name: qts_redis
     restart: always
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    command: redis-server --requirepass "${REDIS_PASSWORD:-qts_local_dev}"
     volumes:
       - ./data/redis:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-qts_local_dev}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -22,7 +23,9 @@ services:
       redis:
         condition: service_healthy
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-qts_local_dev}@redis:6379/0
+    mem_limit: 4g
+    cpus: 2
     volumes:
       - ./logs:/app/logs
       - ./conf:/app/conf:ro
@@ -35,7 +38,7 @@ services:
     # Give the trader time to liquidate positions before SIGKILL
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "python", "-c", "import redis; r=redis.from_url('redis://redis:6379/0'); assert r.exists('SYSTEM:HEARTBEAT')"]
+      test: ["CMD", "python", "-c", "import os; import redis; r=redis.from_url(os.environ.get('REDIS_URL','redis://redis:6379/0')); assert r.exists('SYSTEM:HEARTBEAT')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -53,11 +56,12 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-qts_local_dev}
     ports:
       - "8501:8501"
     volumes:
       - ./conf:/app/conf:ro
     # Avoid coupling to repo paths inside the container: resolve the Streamlit app via import.
     command: >
-      sh -c "streamlit run $(python -c 'import qts_core.dashboard.app as app; print(app.__file__)') --server.port 8501 --server.address 0.0.0.0"
+      sh -c "streamlit run $(python -c 'import qts_core.dashboard.app as app; print(app.__file__)') --server.port 8501 --server.address 127.0.0.1"
     restart: always

@@ -27,6 +27,10 @@ COPY conf ./conf
 RUN poetry config virtualenvs.create false \
     && poetry install --only main --no-interaction --no-ansi
 
+# Run as non-root user
+RUN groupadd -r qts && useradd -r -g qts -m -s /bin/false qts
+USER qts
+
 EXPOSE 8501
 
 # STOPSIGNAL ensures Docker sends SIGTERM (not SIGKILL) for graceful shutdown.
