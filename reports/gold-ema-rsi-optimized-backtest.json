@@ -1,0 +1,29 @@
+{
+  "generated": "2026-04-16T15:37:58.272172+00:00",
+  "symbol": "XAUT/USDT",
+  "strategy": "Gold_EMA_RSI_optimized",
+  "timeframe": "1h",
+  "bars": 4744,
+  "params": {
+    "ema_fast": 12,
+    "ema_slow": 21,
+    "rsi_period": 14,
+    "rsi_entry_max": 70.0,
+    "rsi_exit_min": 85.0,
+    "stop_loss_pct": 0.03,
+    "trailing_stop_pct": 0.015
+  },
+  "results": {
+    "final_capital": 108377.45,
+    "total_return": "8.38%",
+    "bh_return": "24.02%",
+    "alpha_pp": -15.64,
+    "sharpe": 2.625,
+    "sortino": 1.888,
+    "max_drawdown": "-2.57%",
+    "win_rate": "25.5%",
+    "profit_factor": 1.13,
+    "calmar": 6.244,
+    "trades": 136
+  }
+}

@@ -245,6 +245,13 @@ class TestClaudeStrategyAgent:
         assert signal is not None
         assert signal.confidence == 1.0
 
+    def test_reads_api_key_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Agent should fall back to ANTHROPIC_API_KEY when api_key is omitted."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+        with patch("anthropic.AsyncAnthropic") as mock_factory:
+            ClaudeStrategyAgent(name="env_claude")
+        assert mock_factory.call_args.kwargs["api_key"] == "env-key"
+
 
 # ---------------------------------------------------------------------------
 # ClaudeRiskAgent Tests

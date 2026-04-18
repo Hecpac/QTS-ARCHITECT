@@ -4,28 +4,34 @@ import asyncio
 import atexit
 import json
 import logging
+import os
 import signal
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO, cast
 
 import hydra
 import structlog
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from qts_core.agents.protocol import SignalType, TradingDecision
-from qts_core.agents.supervisor import Supervisor
 from qts_core.agents.prediction_gate import GateState, PredictionMarketGate
-from qts_core.agents.sentiment_filter import SentimentFilter, SentimentState
+from qts_core.agents.protocol import SignalType, TradingDecision
+from qts_core.agents.sentiment_filter import SentimentFilter
 from qts_core.agents.signal_quality import SignalQuality, SignalQualityEvaluator
+from qts_core.agents.supervisor import ConsensusStrategy, Supervisor
 from qts_core.agents.watchdog import DrawdownWatchdog, WatchdogState
 from qts_core.common.types import InstrumentId, MarketData
-from qts_core.models.regime import MarketRegime, RegimeDetector
 from qts_core.execution.ems import ExecutionError, ExecutionStatus
 from qts_core.execution.oms import OrderManagementSystem, OrderRequest
+from qts_core.models.regime import MarketRegime, RegimeDetector
+from qts_core.polymarket import (
+    ImpliedDirection,
+    PolymarketLoader,
+    SentimentLoader,
+)
 
 
 if TYPE_CHECKING:
@@ -43,25 +49,109 @@ DEFAULT_MAX_DATA_AGE_SECONDS: float = 120.0  # 2 minutes
 STALE_DATA_CONSECUTIVE_LIMIT: int = 5  # halt after N consecutive stale ticks
 
 
+def _iter_target_strings(node: object) -> list[str]:
+    """Collect Hydra `_target_` strings from a nested config subtree."""
+    if isinstance(node, DictConfig):
+        targets: list[str] = []
+        target = node.get("_target_")
+        if isinstance(target, str):
+            targets.append(target)
+        for value in node.values():
+            targets.extend(_iter_target_strings(value))
+        return targets
+
+    if isinstance(node, dict):
+        targets = []
+        target = node.get("_target_")
+        if isinstance(target, str):
+            targets.append(target)
+        for value in node.values():
+            targets.extend(_iter_target_strings(value))
+        return targets
+
+    if isinstance(node, (list, tuple)):
+        targets = []
+        for value in node:
+            targets.extend(_iter_target_strings(value))
+        return targets
+
+    return []
+
+
+def _symbol_to_sentiment_query(symbol: str) -> str:
+    """Map a tradable symbol to the query used by social/prediction loaders."""
+    base_symbol = symbol.split(":")[-1].split("-")[0].split("/")[0].upper()
+    query_map = {
+        "BTC": "Bitcoin",
+        "ETH": "Ethereum",
+        "SOL": "Solana",
+        "GOLD": "Gold",
+        "XAU": "Gold",
+        "NDX": "Nasdaq",
+        "SPX": "S&P 500",
+    }
+    return query_map.get(base_symbol, base_symbol)
+
+
+def _infer_prediction_direction(question: str, query: str) -> ImpliedDirection | None:
+    """Infer whether a Polymarket YES contract is bullish or bearish for the asset."""
+    normalized = question.lower()
+    query_lower = query.lower()
+
+    if query_lower not in normalized:
+        return None
+
+    bullish_markers = (
+        "above",
+        "over",
+        "rise",
+        "rally",
+        "gain",
+        "bull",
+        "surge",
+        "higher",
+        "hit",
+    )
+    bearish_markers = (
+        "below",
+        "under",
+        "drop",
+        "fall",
+        "bear",
+        "crash",
+        "lower",
+        "recession",
+        "lose",
+    )
+
+    if any(marker in normalized for marker in bullish_markers):
+        return ImpliedDirection.BULLISH
+    if any(marker in normalized for marker in bearish_markers):
+        return ImpliedDirection.BEARISH
+    return None
+
+
 def validate_api_keys(cfg: DictConfig) -> None:
     """Verify required API keys are available before starting the trading loop.
 
     Raises RuntimeError for critical missing keys, warns for optional ones.
     """
-    import os
-
-    # Anthropic API key — required if Claude agents are enabled
-    claude_cfg = cfg.get("strategy", {}).get("claude", {})
-    if claude_cfg.get("enabled", False):
+    targets = _iter_target_strings(cfg.get("strategy")) + _iter_target_strings(
+        cfg.get("agents")
+    )
+    if any(target.startswith("qts_core.agents.claude_agent.") for target in targets):
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError(
                 "ANTHROPIC_API_KEY not set but Claude agents are enabled. "
-                "Set the env var or disable Claude agents in config."
+                "Set the env var or remove the Claude strategy bundle."
             )
         log.info("api_key_check_passed", service="anthropic")
 
     # Reddit credentials — optional (sentiment degrades gracefully)
-    if not (os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET")):
+    if not (
+        os.environ.get("REDDIT_CLIENT_ID")
+        and os.environ.get("REDDIT_CLIENT_SECRET")
+    ):
         log.warning(
             "api_key_missing_optional",
             service="reddit",
@@ -69,8 +159,8 @@ def validate_api_keys(cfg: DictConfig) -> None:
         )
 
     # OANDA — required for forex/metals
-    oanda_cfg = cfg.get("exchange", {})
-    if oanda_cfg.get("name", "").lower() == "oanda":
+    gateway_target = str(cfg.get("gateway", {}).get("_target_", ""))
+    if "OANDAGateway" in gateway_target:
         if not os.environ.get("OANDA_API_TOKEN"):
             raise RuntimeError(
                 "OANDA_API_TOKEN not set but OANDA exchange is configured."
@@ -209,7 +299,7 @@ def apply_execution_guardrails(
 class _TeeStream:
     """Mirror writes to both stdout and a local file handle."""
 
-    def __init__(self, *streams: Any) -> None:
+    def __init__(self, *streams: TextIO) -> None:
         self._streams = streams
 
     def write(self, data: str) -> None:
@@ -238,7 +328,7 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.add_log_level,
             structlog.processors.JSONRenderer(),
         ],
-        logger_factory=structlog.PrintLoggerFactory(file=tee_stream),
+        logger_factory=structlog.PrintLoggerFactory(file=cast(TextIO, tee_stream)),
         cache_logger_on_first_use=True,
     )
 
@@ -385,16 +475,75 @@ class LiveTrader:
         )
         self.ems: ExecutionGateway = instantiate(cfg.gateway)
 
-        strategies = [instantiate(agent_cfg) for agent_cfg in cfg.agents.strategies]
-        risk_agent = instantiate(cfg.agents.risk)
+        strategies_cfg = list(cfg.agents.strategies)
+        risk_cfg = cfg.agents.risk
         supervisor_cfg = cfg.get("supervisor")
-        supervisor_min_confidence: float = float(
-            supervisor_cfg.get("min_confidence", 0.6) if supervisor_cfg else 0.6
+        strategy_cfg = cfg.get("strategy")
+        if isinstance(strategy_cfg, DictConfig):
+            if strategy_cfg.get("agents") is not None:
+                bundle_agents = strategy_cfg.agents
+                strategies_cfg = list(bundle_agents.get("strategies", strategies_cfg))
+                risk_override = bundle_agents.get("risk")
+                if risk_override is not None:
+                    risk_cfg = risk_override
+            elif strategy_cfg.get("_target_"):
+                strategies_cfg = [strategy_cfg]
+
+        strategies = [instantiate(agent_cfg) for agent_cfg in strategies_cfg]
+        risk_agent = instantiate(risk_cfg)
+        bundle_supervisor_cfg = (
+            strategy_cfg.get("supervisor")
+            if isinstance(strategy_cfg, DictConfig)
+            else None
         )
+        supervisor_min_confidence: float = float(
+            bundle_supervisor_cfg.get(
+                "min_confidence",
+                supervisor_cfg.get("min_confidence", 0.6) if supervisor_cfg else 0.6,
+            )
+            if bundle_supervisor_cfg is not None
+            else supervisor_cfg.get("min_confidence", 0.6) if supervisor_cfg else 0.6
+        )
+        supervisor_min_agents_required = int(
+            bundle_supervisor_cfg.get(
+                "min_agents_required",
+                supervisor_cfg.get("min_agents_required", 1) if supervisor_cfg else 1,
+            )
+            if bundle_supervisor_cfg is not None
+            else supervisor_cfg.get("min_agents_required", 1) if supervisor_cfg else 1
+        )
+        consensus_name = str(
+            bundle_supervisor_cfg.get(
+                "consensus_strategy",
+                supervisor_cfg.get(
+                    "consensus_strategy",
+                    ConsensusStrategy.HIGHEST_CONFIDENCE.value,
+                )
+                if supervisor_cfg else ConsensusStrategy.HIGHEST_CONFIDENCE.value,
+            )
+            if bundle_supervisor_cfg is not None
+            else supervisor_cfg.get(
+                "consensus_strategy",
+                ConsensusStrategy.HIGHEST_CONFIDENCE.value,
+            )
+            if supervisor_cfg else ConsensusStrategy.HIGHEST_CONFIDENCE.value
+        )
+        try:
+            consensus_strategy = ConsensusStrategy(consensus_name)
+        except ValueError:
+            log.warning(
+                "Invalid supervisor consensus strategy; using default",
+                configured=consensus_name,
+                default=ConsensusStrategy.HIGHEST_CONFIDENCE.value,
+            )
+            consensus_strategy = ConsensusStrategy.HIGHEST_CONFIDENCE
+
         self.supervisor = Supervisor(
             strategy_agents=strategies,
             risk_agent=risk_agent,
+            consensus_strategy=consensus_strategy,
             min_confidence=supervisor_min_confidence,
+            min_agents_required=supervisor_min_agents_required,
         )
         self.max_portfolio_exposure_forced_exit: float = max(
             0.0,
@@ -454,103 +603,320 @@ class LiveTrader:
             ),
         )
 
-        # Sentiment Filter (AutoResearch 2026-03-29: FinBERT blocks BUY < -0.70)
+        # Strategy-specific gates must keep independent state per symbol.
         sentiment_cfg = cfg.get("sentiment")
-        self.sentiment_filter = SentimentFilter(
-            block_threshold=float(
+        quality_cfg = cfg.get("signal_quality")
+        prediction_cfg = cfg.get("prediction_gate")
+        regime_cfg = cfg.get("regime")
+
+        self._sentiment_filter_kwargs: dict[str, float | int] = {
+            "block_threshold": float(
                 sentiment_cfg.get("block_threshold", -0.70)
                 if sentiment_cfg else -0.70
             ),
-            boost_threshold=float(
-                sentiment_cfg.get("boost_threshold", 0.70)
-                if sentiment_cfg else 0.70
+            "boost_threshold": float(
+                sentiment_cfg.get("boost_threshold", 0.70) if sentiment_cfg else 0.70
             ),
-            window_hours=float(
-                sentiment_cfg.get("window_hours", 6.0)
-                if sentiment_cfg else 6.0
+            "window_hours": float(
+                sentiment_cfg.get("window_hours", 6.0) if sentiment_cfg else 6.0
             ),
-            min_samples=int(
-                sentiment_cfg.get("min_samples", 3)
-                if sentiment_cfg else 3
+            "min_samples": int(
+                sentiment_cfg.get("min_samples", 3) if sentiment_cfg else 3
             ),
-        )
-
-        # Signal Quality Evaluator (whipsaw detection)
-        quality_cfg = cfg.get("signal_quality")
-        self.signal_quality = SignalQualityEvaluator(
-            window_signals=int(
+        }
+        self._signal_quality_kwargs: dict[str, float | int] = {
+            "window_signals": int(
                 quality_cfg.get("window_signals", 10) if quality_cfg else 10
             ),
-            high_consistency=float(
+            "high_consistency": float(
                 quality_cfg.get("high_consistency", 0.70) if quality_cfg else 0.70
             ),
-            medium_consistency=float(
+            "medium_consistency": float(
                 quality_cfg.get("medium_consistency", 0.50) if quality_cfg else 0.50
             ),
-            high_max_flip_rate=float(
+            "high_max_flip_rate": float(
                 quality_cfg.get("high_max_flip_rate", 0.20) if quality_cfg else 0.20
             ),
-            medium_max_flip_rate=float(
+            "medium_max_flip_rate": float(
                 quality_cfg.get("medium_max_flip_rate", 0.40) if quality_cfg else 0.40
             ),
-            medium_size_scale=float(
+            "medium_size_scale": float(
                 quality_cfg.get("medium_size_scale", 0.60) if quality_cfg else 0.60
             ),
-            min_samples=int(
+            "min_samples": int(
                 quality_cfg.get("min_samples", 5) if quality_cfg else 5
             ),
-            window_hours=float(
+            "window_hours": float(
                 quality_cfg.get("window_hours", 24.0) if quality_cfg else 24.0
             ),
-        )
-
-        # Prediction Market Gate (Polymarket contradiction filter)
-        prediction_cfg = cfg.get("prediction_gate")
-        self.prediction_gate = PredictionMarketGate(
-            block_threshold=float(
+        }
+        self._prediction_gate_kwargs: dict[str, float | int] = {
+            "block_threshold": float(
                 prediction_cfg.get("block_threshold", 0.80)
                 if prediction_cfg else 0.80
             ),
-            warn_threshold=float(
+            "warn_threshold": float(
                 prediction_cfg.get("warn_threshold", 0.65)
                 if prediction_cfg else 0.65
             ),
-            warn_size_scale=float(
+            "warn_size_scale": float(
                 prediction_cfg.get("warn_size_scale", 0.50)
                 if prediction_cfg else 0.50
             ),
-            window_hours=float(
+            "window_hours": float(
                 prediction_cfg.get("window_hours", 12.0)
                 if prediction_cfg else 12.0
             ),
-            min_signals=int(
-                prediction_cfg.get("min_signals", 1)
-                if prediction_cfg else 1
+            "min_signals": int(
+                prediction_cfg.get("min_signals", 1) if prediction_cfg else 1
+            ),
+        }
+        self._regime_detector_kwargs: dict[str, float | int] = {
+            "lookback": int(regime_cfg.get("lookback", 100) if regime_cfg else 100),
+            "atr_period": int(regime_cfg.get("atr_period", 14) if regime_cfg else 14),
+            "low_percentile": float(
+                regime_cfg.get("low_percentile", 0.25) if regime_cfg else 0.25
+            ),
+            "high_percentile": float(
+                regime_cfg.get("high_percentile", 0.75) if regime_cfg else 0.75
+            ),
+            "crisis_percentile": float(
+                regime_cfg.get("crisis_percentile", 0.95) if regime_cfg else 0.95
+            ),
+            "high_vol_size_scale": float(
+                regime_cfg.get("high_vol_size_scale", 0.60) if regime_cfg else 0.60
+            ),
+        }
+
+        self._sentiment_filters = {
+            symbol_name: self._new_sentiment_filter()
+            for symbol_name in self.symbols
+        }
+        self._signal_qualities = {
+            symbol_name: self._new_signal_quality()
+            for symbol_name in self.symbols
+        }
+        self._prediction_gates = {
+            symbol_name: self._new_prediction_gate()
+            for symbol_name in self.symbols
+        }
+        self._regime_detectors = {
+            symbol_name: self._new_regime_detector()
+            for symbol_name in self.symbols
+        }
+
+        # Preserve the original single-symbol attributes for existing tests/callers.
+        self.sentiment_filter = self._sentiment_filters[self.symbol]
+        self.signal_quality = self._signal_qualities[self.symbol]
+        self.prediction_gate = self._prediction_gates[self.symbol]
+        self.regime_detector = self._regime_detectors[self.symbol]
+
+        self._sentiment_loader: SentimentLoader | None = None
+        self._prediction_loader: PolymarketLoader | None = None
+        self._sentiment_refresh_interval_seconds = float(
+            sentiment_cfg.get("refresh_interval_seconds", 900.0)
+            if sentiment_cfg else 900.0
+        )
+        self._prediction_refresh_interval_seconds = float(
+            prediction_cfg.get("refresh_interval_seconds", 900.0)
+            if prediction_cfg else 900.0
+        )
+        self._sentiment_fetch_timeout_seconds = float(
+            sentiment_cfg.get("fetch_timeout_seconds", 15.0)
+            if sentiment_cfg else 15.0
+        )
+        self._prediction_fetch_timeout_seconds = float(
+            prediction_cfg.get("fetch_timeout_seconds", 10.0)
+            if prediction_cfg else 10.0
+        )
+        self._prediction_market_limit = int(
+            prediction_cfg.get("market_limit", 5) if prediction_cfg else 5
+        )
+        self._last_sentiment_refresh_at: dict[str, datetime] = {}
+        self._last_prediction_refresh_at: dict[str, datetime] = {}
+
+        if self._sentiment_refresh_interval_seconds > 0:
+            self._sentiment_loader = SentimentLoader()
+        if self._prediction_refresh_interval_seconds > 0:
+            self._prediction_loader = PolymarketLoader()
+
+    def _new_sentiment_filter(self) -> SentimentFilter:
+        return SentimentFilter(
+            block_threshold=float(self._sentiment_filter_kwargs["block_threshold"]),
+            boost_threshold=float(self._sentiment_filter_kwargs["boost_threshold"]),
+            window_hours=float(self._sentiment_filter_kwargs["window_hours"]),
+            min_samples=int(self._sentiment_filter_kwargs["min_samples"]),
+        )
+
+    def _new_signal_quality(self) -> SignalQualityEvaluator:
+        return SignalQualityEvaluator(
+            window_signals=int(self._signal_quality_kwargs["window_signals"]),
+            high_consistency=float(
+                self._signal_quality_kwargs["high_consistency"]
+            ),
+            medium_consistency=float(
+                self._signal_quality_kwargs["medium_consistency"]
+            ),
+            high_max_flip_rate=float(
+                self._signal_quality_kwargs["high_max_flip_rate"]
+            ),
+            medium_max_flip_rate=float(
+                self._signal_quality_kwargs["medium_max_flip_rate"]
+            ),
+            medium_size_scale=float(
+                self._signal_quality_kwargs["medium_size_scale"]
+            ),
+            min_samples=int(self._signal_quality_kwargs["min_samples"]),
+            window_hours=float(self._signal_quality_kwargs["window_hours"]),
+        )
+
+    def _new_prediction_gate(self) -> PredictionMarketGate:
+        return PredictionMarketGate(
+            block_threshold=float(self._prediction_gate_kwargs["block_threshold"]),
+            warn_threshold=float(self._prediction_gate_kwargs["warn_threshold"]),
+            warn_size_scale=float(self._prediction_gate_kwargs["warn_size_scale"]),
+            window_hours=float(self._prediction_gate_kwargs["window_hours"]),
+            min_signals=int(self._prediction_gate_kwargs["min_signals"]),
+        )
+
+    def _new_regime_detector(self) -> RegimeDetector:
+        return RegimeDetector(
+            lookback=int(self._regime_detector_kwargs["lookback"]),
+            atr_period=int(self._regime_detector_kwargs["atr_period"]),
+            low_percentile=float(self._regime_detector_kwargs["low_percentile"]),
+            high_percentile=float(self._regime_detector_kwargs["high_percentile"]),
+            crisis_percentile=float(
+                self._regime_detector_kwargs["crisis_percentile"]
+            ),
+            high_vol_size_scale=float(
+                self._regime_detector_kwargs["high_vol_size_scale"]
             ),
         )
 
-        # Regime Detector (AutoResearch 2026-03-29: ATR regime filters)
-        regime_cfg = cfg.get("regime")
-        self.regime_detector = RegimeDetector(
-            lookback=int(
-                regime_cfg.get("lookback", 100) if regime_cfg else 100
-            ),
-            atr_period=int(
-                regime_cfg.get("atr_period", 14) if regime_cfg else 14
-            ),
-            low_percentile=float(
-                regime_cfg.get("low_percentile", 0.25) if regime_cfg else 0.25
-            ),
-            high_percentile=float(
-                regime_cfg.get("high_percentile", 0.75) if regime_cfg else 0.75
-            ),
-            crisis_percentile=float(
-                regime_cfg.get("crisis_percentile", 0.95) if regime_cfg else 0.95
-            ),
-            high_vol_size_scale=float(
-                regime_cfg.get("high_vol_size_scale", 0.60)
-                if regime_cfg else 0.60
-            ),
+    def _get_sentiment_filter(self, symbol: str) -> SentimentFilter:
+        return self._sentiment_filters[symbol]
+
+    def _get_signal_quality(self, symbol: str) -> SignalQualityEvaluator:
+        return self._signal_qualities[symbol]
+
+    def _get_prediction_gate(self, symbol: str) -> PredictionMarketGate:
+        return self._prediction_gates[symbol]
+
+    def _get_regime_detector(self, symbol: str) -> RegimeDetector:
+        return self._regime_detectors[symbol]
+
+    @staticmethod
+    def _refresh_due(
+        last_refresh: datetime | None,
+        now: datetime,
+        interval_seconds: float,
+    ) -> bool:
+        if interval_seconds <= 0:
+            return False
+        if last_refresh is None:
+            return True
+        return (now - last_refresh).total_seconds() >= interval_seconds
+
+    async def _refresh_sentiment_context(
+        self,
+        symbol: str,
+        now: datetime,
+    ) -> None:
+        if self._sentiment_loader is None:
+            return
+
+        last_refresh = self._last_sentiment_refresh_at.get(symbol)
+        if not self._refresh_due(
+            last_refresh,
+            now,
+            self._sentiment_refresh_interval_seconds,
+        ):
+            return
+
+        query = _symbol_to_sentiment_query(symbol)
+        try:
+            snapshot = await asyncio.wait_for(
+                self._sentiment_loader.get_sentiment(query),
+                timeout=self._sentiment_fetch_timeout_seconds,
+            )
+        except Exception as exc:
+            log.warning(
+                "Sentiment refresh failed",
+                symbol=symbol,
+                query=query,
+                error=str(exc),
+            )
+            self._last_sentiment_refresh_at[symbol] = now
+            return
+
+        if snapshot.volume > 0:
+            self._get_sentiment_filter(symbol).add_score(
+                snapshot.score,
+                timestamp=snapshot.timestamp,
+                source=snapshot.source.value,
+            )
+
+        self._last_sentiment_refresh_at[symbol] = now
+
+    async def _refresh_prediction_context(
+        self,
+        symbol: str,
+        now: datetime,
+    ) -> None:
+        if self._prediction_loader is None:
+            return
+
+        last_refresh = self._last_prediction_refresh_at.get(symbol)
+        if not self._refresh_due(
+            last_refresh,
+            now,
+            self._prediction_refresh_interval_seconds,
+        ):
+            return
+
+        query = _symbol_to_sentiment_query(symbol)
+        try:
+            markets = await asyncio.wait_for(
+                self._prediction_loader.search_markets(
+                    query,
+                    limit=self._prediction_market_limit,
+                ),
+                timeout=self._prediction_fetch_timeout_seconds,
+            )
+        except Exception as exc:
+            log.warning(
+                "Prediction market refresh failed",
+                symbol=symbol,
+                query=query,
+                error=str(exc),
+            )
+            self._last_prediction_refresh_at[symbol] = now
+            return
+
+        gate = self._get_prediction_gate(symbol)
+        gate.reset()
+        for market in markets:
+            implied_direction = _infer_prediction_direction(market.question, query)
+            if implied_direction is None:
+                continue
+            gate.add_signal(
+                event_id=market.condition_id,
+                direction=implied_direction,
+                probability=market.implied_probability,
+                source="polymarket",
+                timestamp=now,
+            )
+
+        self._last_prediction_refresh_at[symbol] = now
+
+    async def _refresh_external_risk_context(
+        self,
+        symbol: str,
+        now: datetime,
+    ) -> None:
+        await asyncio.gather(
+            self._refresh_sentiment_context(symbol, now),
+            self._refresh_prediction_context(symbol, now),
         )
 
     def _validate_data_freshness(self, data_ts: datetime) -> bool:
@@ -1329,7 +1695,11 @@ class LiveTrader:
         except Exception as exc:
             log.warning("Heartbeat publish failed", error=str(exc))
 
-    def _publish_telemetry(self, market_data: MarketData | None = None) -> None:
+    def _publish_telemetry(
+        self,
+        market_data: MarketData | None = None,
+        total_value_override: float | None = None,
+    ) -> None:
         telemetry_cfg = self.cfg.get("telemetry")
         if not telemetry_cfg:
             return
@@ -1342,7 +1712,11 @@ class LiveTrader:
         try:
             # Remember last good tick so we can publish even if the next fetch fails.
             self._last_market_data = market_data
-            total_value = self._compute_total_value(market_data.close)
+            total_value = (
+                total_value_override
+                if total_value_override is not None
+                else self._compute_total_value(market_data.close)
+            )
             daily_pnl_fraction = self._compute_daily_pnl_fraction(
                 total_value,
                 market_data.timestamp,
@@ -1446,6 +1820,15 @@ class LiveTrader:
                 total_value,
             )
 
+        await self._refresh_external_risk_context(
+            instrument_symbol,
+            market_data.timestamp,
+        )
+        sentiment_filter = self._get_sentiment_filter(instrument_symbol)
+        signal_quality = self._get_signal_quality(instrument_symbol)
+        prediction_gate = self._get_prediction_gate(instrument_symbol)
+        regime_detector = self._get_regime_detector(instrument_symbol)
+
         session_drawdown = self._compute_session_drawdown_fraction(total_value)
         if (
             self.max_session_drawdown > 0
@@ -1470,11 +1853,14 @@ class LiveTrader:
                 equity=total_value,
                 peak=watchdog_verdict.peak_equity,
             )
-            self._publish_telemetry(market_data, total_value)
+            self._publish_telemetry(
+                market_data,
+                total_value_override=total_value,
+            )
             return
 
         # ── Regime Detection gate ──────────────────────────────────
-        regime_verdict = self.regime_detector.update(
+        regime_verdict = regime_detector.update(
             high=market_data.high,
             low=market_data.low,
             close=market_data.close,
@@ -1486,11 +1872,14 @@ class LiveTrader:
                 atr=f"{regime_verdict.current_atr:.6f}",
                 percentile=f"{regime_verdict.atr_percentile:.0%}",
             )
-            self._publish_telemetry(market_data, total_value)
+            self._publish_telemetry(
+                market_data,
+                total_value_override=total_value,
+            )
             return
 
         # ── Sentiment Filter evaluation ───────────────────────────────
-        sentiment_verdict = self.sentiment_filter.evaluate(
+        sentiment_verdict = sentiment_filter.evaluate(
             now=market_data.timestamp,
         )
 
@@ -1604,7 +1993,7 @@ class LiveTrader:
         # ── Sentiment Filter gate (block LONG entries) ────────────
         if (
             sentiment_verdict.block_longs
-            and decision.action != SignalType.EXIT
+            and decision.action == SignalType.LONG
         ):
             log.warning(
                 "SENTIMENT FILTER — blocking LONG entry",
@@ -1615,13 +2004,13 @@ class LiveTrader:
             return
 
         # ── Signal Quality gate (whipsaw detection) ─────────────────
-        self.signal_quality.record_signal(
+        signal_quality.record_signal(
             direction=decision.action,
             confidence=decision.quantity_modifier,
             timestamp=market_data.timestamp,
         )
         if decision.action != SignalType.EXIT:
-            quality_verdict = self.signal_quality.evaluate(now=market_data.timestamp)
+            quality_verdict = signal_quality.evaluate(now=market_data.timestamp)
             if quality_verdict.block_entry:
                 log.warning(
                     "SIGNAL QUALITY — blocking entry (whipsaw)",
@@ -1633,7 +2022,7 @@ class LiveTrader:
 
         # ── Prediction Market gate ────────────────────────────────
         if decision.action != SignalType.EXIT:
-            pred_verdict = self.prediction_gate.evaluate(
+            pred_verdict = prediction_gate.evaluate(
                 trade_direction=decision.action,
                 now=market_data.timestamp,
             )
@@ -1684,7 +2073,7 @@ class LiveTrader:
                         f"SignalQuality {quality_verdict.quality.value} "
                         f"{quality_mult:.0%}"
                     )
-                if pred_mult < 1.0:
+                if pred_verdict is not None and pred_mult < 1.0:
                     parts.append(
                         f"PredictionGate {pred_verdict.state.value} "
                         f"{pred_mult:.0%}"
@@ -1706,7 +2095,7 @@ class LiveTrader:
                 )
 
         if decision.action == SignalType.EXIT:
-            guarded_decision = decision
+            guarded_decision: TradingDecision | None = decision
         else:
             projected_quantity = self.oms.calculate_order_quantity(
                 market_data.close,
@@ -1745,6 +2134,7 @@ class LiveTrader:
                 )
                 return
 
+        assert guarded_decision is not None
         if self._entry_is_throttled(
             symbol=instrument_symbol,
             action=guarded_decision.action,
@@ -2058,6 +2448,8 @@ class LiveTrader:
             log.exception("Fatal Crash in Live Loop")
         finally:
             log.info("Shutting down services...")
+            if self._sentiment_loader is not None:
+                await self._sentiment_loader.close()
             await self.ems.stop()
 
 

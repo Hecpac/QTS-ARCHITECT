@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 # Ensure src/ is on the path for direct pytest runs
@@ -126,6 +127,25 @@ def _build_live_trader() -> LiveTrader:
         }
     )
     return LiveTrader(cfg)
+
+
+def test_strategy_bundle_override_wires_live_trader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Hydra `strategy=claude_hybrid` override should drive runtime wiring."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-key")
+    conf_dir = str((ROOT / "conf").resolve())
+
+    with initialize_config_dir(config_dir=conf_dir, version_base=None):
+        cfg = compose(
+            config_name="live",
+            overrides=["strategy=claude_hybrid", "store=memory", "gateway=mock"],
+        )
+
+    trader = LiveTrader(cfg)
+    assert len(trader.supervisor.strategy_agents) == 3
+    assert trader.supervisor.consensus_strategy.value == "majority_vote"
+    assert trader.supervisor.risk_agent.name == "Claude_Risk_Officer"
 
 
 def test_bullish_tick_creates_and_settles_order():

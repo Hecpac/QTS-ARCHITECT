@@ -17,11 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import structlog
 
@@ -175,7 +174,10 @@ class PolymarketLoader:
                     f"polymarket CLI failed (rc={proc.returncode}): {err_msg}"
                 )
 
-            return json.loads(stdout.decode())
+            decoded = json.loads(stdout.decode())
+            if not isinstance(decoded, (dict, list)):
+                raise RuntimeError("polymarket CLI returned unexpected JSON type")
+            return cast(dict[str, Any] | list[Any], decoded)
 
         except asyncio.TimeoutError:
             raise RuntimeError(
@@ -183,6 +185,15 @@ class PolymarketLoader:
             )
         except json.JSONDecodeError as e:
             raise RuntimeError(f"Failed to parse CLI output: {e}")
+
+    async def _run_cli_dict(self, *args: str) -> dict[str, Any]:
+        """Execute a CLI command that must return a JSON object."""
+        raw = await self._run_cli(*args)
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"polymarket CLI returned {type(raw).__name__}, expected object"
+            )
+        return raw
 
     # ------------------------------------------------------------------
     # Market Discovery
@@ -251,7 +262,7 @@ class PolymarketLoader:
         Returns:
             Market details.
         """
-        raw = await self._run_cli("markets", "get", condition_id)
+        raw = await self._run_cli_dict("markets", "get", condition_id)
         return self._parse_market(raw)
 
     # ------------------------------------------------------------------
@@ -266,7 +277,7 @@ class PolymarketLoader:
         Returns:
             Orderbook with bids and asks.
         """
-        raw = await self._run_cli("clob", "book", token_id)
+        raw = await self._run_cli_dict("clob", "book", token_id)
 
         bids = [
             OrderbookLevel(price=float(b["price"]), size=float(b["size"]))
@@ -301,7 +312,7 @@ class PolymarketLoader:
         Returns:
             Mid price (average of best bid and best ask).
         """
-        raw = await self._run_cli("clob", "price", token_id)
+        raw = await self._run_cli_dict("clob", "price", token_id)
         return float(raw.get("price", 0.0))
 
     async def get_spread(self, token_id: str) -> dict[str, float]:
@@ -313,7 +324,7 @@ class PolymarketLoader:
         Returns:
             Dict with bid, ask, spread keys.
         """
-        raw = await self._run_cli("clob", "spread", token_id)
+        raw = await self._run_cli_dict("clob", "spread", token_id)
         return {
             "bid": float(raw.get("bid", 0.0)),
             "ask": float(raw.get("ask", 0.0)),

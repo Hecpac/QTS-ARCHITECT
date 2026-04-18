@@ -6,6 +6,7 @@ defaults:
   #   alpaca — US stocks/ETFs — needs ALPACA_API_KEY + ALPACA_SECRET_KEY
   - gateway: mock
   - store: redis
+  - optional strategy: null
   - _self_
 
 env: "dev"
@@ -32,14 +33,14 @@ agents:
       name: ICT_Sniper_NY
       symbol: BTC/USDT
       session_start: 8  # NY local kill zone 08:00-11:00 (DST-aware)
-      session_end: 11
+      session_end: 10   # Deepthink sweep #1: 08-10 beats 08-11 (10:00 NY drag)
       session_timezone: America/New_York
       enable_session_range_breakout_reversal: true
-      session_range_breakout_only: false  # Long-only breakout + FVG fallback
+      session_range_breakout_only: true   # Deepthink sweep #1: breakout-only (FVG bearish 9% WR)
       enable_high_breakout_short: false
       enable_low_breakout_long: true
       exit_on_session_target_hit: true
-      breakout_buffer_bps: 5.0
+      breakout_buffer_bps: 10.0  # Deepthink sweep #1: b10 filters noise better
       hard_block_minutes_ny: ["08:45"]
       hard_block_pattern_minutes_ny: ["Session low breakout reversal|09:45"]
       soft_risk_pattern_minutes_ny:

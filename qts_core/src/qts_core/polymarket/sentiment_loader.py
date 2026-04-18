@@ -306,6 +306,10 @@ class RedditClient:
                     "User-Agent": REDDIT_USER_AGENT,
                 }
             )
+        else:
+            self._session.headers.update({
+                "Authorization": f"Bearer {self._token}",
+            })
         return self._session
 
     async def search_subreddit(
@@ -518,7 +522,7 @@ class SentimentLoader:
                 snapshots[query] = SentimentSnapshot(
                     query=query, source=SentimentSource.COMBINED
                 )
-            else:
+            elif isinstance(result, SentimentSnapshot):
                 snapshots[query] = result
 
         return snapshots

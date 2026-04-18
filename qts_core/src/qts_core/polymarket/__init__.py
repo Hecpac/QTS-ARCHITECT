@@ -13,6 +13,7 @@ from .polymarket_loader import (
     PolymarketMarket,
     PolymarketOrderbook,
 )
+from qts_core.agents.prediction_gate import ImpliedDirection
 from .polymarket_oms import (
     PolymarketOMS,
     PolymarketOrder,
@@ -31,6 +32,7 @@ from .sentiment_loader import (
 __all__ = [
     "MarketOpportunity",
     "OrderbookLevel",
+    "ImpliedDirection",
     "PolymarketAgent",
     "PolymarketLoader",
     "PolymarketMarket",

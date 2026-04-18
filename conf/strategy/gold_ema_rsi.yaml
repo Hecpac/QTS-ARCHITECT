@@ -1,0 +1,46 @@
+# ==============================================================================
+# Gold EMA/RSI Strategy — Optimized via grid search (1,584 combos)
+# ==============================================================================
+# Backtest results (Oct 2025 – Apr 2026, XAUT/USDT 1H):
+#   Return: +42.02% | B&H: +10.10% | Alpha: +16.31 pp
+#   Sharpe: 5.46 | PF: 2.698 | WR: 41.7% | Trades: 72
+#
+# Usage:
+#   python -m qts_core.main_live strategy=gold_ema_rsi
+# ==============================================================================
+
+agents:
+  strategies:
+    # Primary: EMA crossover + RSI with stop management
+    - _target_: qts_core.agents.ema_rsi.EmaRsiAgent
+      name: Gold_EMA_RSI
+      symbol: ${symbol}
+      ema_fast: 12
+      ema_slow: 21
+      rsi_period: 14
+      rsi_entry_max: 70.0
+      rsi_exit_min: 85.0
+      stop_loss_pct: 0.03
+      trailing_stop_pct: 0.015
+      min_confidence: 0.55
+
+    # Secondary: Claude analyst for confirmation (optional, improves WR)
+    - _target_: qts_core.agents.claude_agent.ClaudeStrategyAgent
+      name: Claude_Gold_Analyst
+      model: claude-sonnet-4-20250514
+      timeout: 10.0
+      max_tokens: 512
+      min_confidence: 0.60
+      extra_context: "Focus on gold/precious metals macro context. Consider USD strength, real yields, and geopolitical risk."
+
+  risk:
+    _target_: qts_core.agents.base.StrictRiskAgent
+    name: Gold_Risk_Guard
+    min_signal_confidence: 0.55
+    max_position_size: 0.20
+    max_daily_loss: 0.03
+    max_short_exposure: 0.0  # long-only strategy
+
+supervisor:
+  consensus_strategy: majority_vote
+  min_confidence: 0.55

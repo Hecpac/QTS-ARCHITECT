@@ -22,7 +22,8 @@ Design Decisions:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import os
+from datetime import datetime
 from typing import Any, Final
 
 import structlog
@@ -180,6 +181,7 @@ class ClaudeStrategyAgent(BaseStrategyAgent):
         self.timeout = timeout
         self.extra_context = extra_context
 
+        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError(f"Agent '{name}' requires a valid Anthropic API key")
 
@@ -243,7 +245,7 @@ class ClaudeStrategyAgent(BaseStrategyAgent):
                     tools=[_SIGNAL_TOOL],
                     tool_choice={"type": "tool", "name": "emit_trading_signal"},
                     messages=[{"role": "user", "content": user_message}],
-                ),
+                ),  # type: ignore[call-overload]
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
@@ -349,6 +351,7 @@ class ClaudeRiskAgent(BaseRiskAgent):
         self.model = model
         self.timeout = timeout
 
+        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError(f"Agent '{name}' requires a valid Anthropic API key")
 
@@ -400,7 +403,7 @@ class ClaudeRiskAgent(BaseRiskAgent):
                     tools=[_RISK_TOOL],
                     tool_choice={"type": "tool", "name": "emit_risk_verdict"},
                     messages=[{"role": "user", "content": user_message}],
-                ),
+                ),  # type: ignore[call-overload]
                 timeout=self.timeout,
             )
         except Exception as exc:
@@ -480,6 +483,7 @@ class ClaudeSentimentAgent(BaseStrategyAgent):
         self.model = model
         self.timeout = timeout
 
+        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError(f"Agent '{name}' requires a valid Anthropic API key")
 
@@ -528,7 +532,7 @@ class ClaudeSentimentAgent(BaseStrategyAgent):
                     tools=[_SIGNAL_TOOL],
                     tool_choice={"type": "tool", "name": "emit_trading_signal"},
                     messages=[{"role": "user", "content": user_message}],
-                ),
+                ),  # type: ignore[call-overload]
                 timeout=self.timeout,
             )
         except Exception as exc:
